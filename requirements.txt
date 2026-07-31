@@ -1,6 +1,7 @@
 numpy
 openpyxl
 pandas
+pytest
 requests
 scipy
 yfinance

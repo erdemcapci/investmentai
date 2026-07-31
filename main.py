@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,6 +15,60 @@ import requests
 import yfinance as yf
 from tqdm.auto import tqdm
 
+from scoring import (
+    INSUFFICIENT_DATA,
+    MIN_ANALYST_LONG_TERM_COVERAGE,
+    MIN_SHORT_TERM_COVERAGE,
+    PARTIAL_DATA,
+    RANKED,
+    SCORING_MODEL_VERSION,
+    assign_candidate_profile,
+    assign_long_term_category,
+    assign_short_term_category,
+    calculate_coverage_confidence,
+    format_driver_text,
+    score_absolute_volatility,
+    score_analyst_sentiment,
+    score_earnings_timing,
+    score_eps_revisions,
+    score_long_term_trend,
+    score_ma_alignment,
+    score_momentum,
+    score_pullback_quality,
+    score_sector_volatility_percentile,
+    score_selloff_stability,
+    score_target_agreement,
+    score_target_upside,
+    safe_float,
+    weighted_score_available,
+)
+
+
+def load_dotenv_file(
+    path: Path = Path(".env"),
+) -> None:
+
+    if not path.exists():
+        return
+
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if (
+            not stripped
+            or stripped.startswith("#")
+            or "=" not in stripped
+        ):
+            continue
+
+        key, value = stripped.split("=", 1)
+        os.environ.setdefault(
+            key.strip(),
+            value.strip().strip('"').strip("'"),
+        )
+
+
+load_dotenv_file()
+
 
 # ============================================================
 # SETTINGS
@@ -24,6 +79,23 @@ TICKER_TO_CHECK = "MU"
 
 # Terminalde gösterilecek maksimum satır
 TOP_N = 50
+
+# Dosya çıktıları varsayılan olarak kapalı.
+# CSV/Excel üretmek için EXPORT_RESULTS=true kullan.
+EXPORT_RESULTS = (
+    os.getenv(
+        "EXPORT_RESULTS",
+        "false",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+)
 
 # Yahoo analyst request worker sayısı
 # Rate-limit hatası olursa 2 yap.
@@ -39,7 +111,18 @@ LOW_ANALYST_COVERAGE_THRESHOLD = 10
 HIGH_TARGET_DISPERSION_THRESHOLD_PCT = 50
 EARNINGS_WARNING_DAYS = 7
 HIGH_VOLATILITY_THRESHOLD_PCT = 60
-LOW_AVERAGE_DOLLAR_VOLUME = 10_000_000
+LOW_AVERAGE_DOLLAR_VOLUME = float(
+    os.getenv(
+        "LOW_AVERAGE_DOLLAR_VOLUME",
+        "10000000",
+    )
+)
+VERY_LOW_AVERAGE_DOLLAR_VOLUME = float(
+    os.getenv(
+        "VERY_LOW_AVERAGE_DOLLAR_VOLUME",
+        "5000000",
+    )
+)
 
 RUN_STARTED_AT_UTC = pd.Timestamp.now(tz="UTC")
 RUN_ID = RUN_STARTED_AT_UTC.strftime("%Y%m%d_%H%M%S_UTC")
@@ -1121,26 +1204,26 @@ def make_risk_flags(
     flags: list[str] = []
 
     if pd.isna(
-        row["current_price"]
+        row.get("current_price")
     ):
         flags.append(
             "MISSING_CURRENT_PRICE"
         )
 
     if pd.isna(
-        row["selected_target"]
+        row.get("selected_target_price")
     ):
         flags.append(
             "MISSING_ANALYST_TARGET"
         )
 
-    if row["rating_count"] == 0:
+    if row.get("rating_count", 0) == 0:
         flags.append(
             "MISSING_RECOMMENDATIONS"
         )
 
     if (
-        row["rating_count"]
+        row.get("rating_count", 0)
         < LOW_ANALYST_COVERAGE_THRESHOLD
     ):
         flags.append(
@@ -1149,21 +1232,44 @@ def make_risk_flags(
 
     if (
         pd.notna(
-            row["target_dispersion_pct"]
+            row.get("target_dispersion_pct")
         )
-        and row["target_dispersion_pct"]
+        and row.get("target_dispersion_pct")
         > HIGH_TARGET_DISPERSION_THRESHOLD_PCT
     ):
         flags.append(
-            "HIGH_TARGET_DISPERSION"
+            "HIGH_TARGET_DISAGREEMENT"
         )
 
     if (
         pd.notna(
-            row["days_to_earnings"]
+            row.get("selected_target_upside_pct")
+        )
+        and row.get("selected_target_upside_pct")
+        >= 80
+    ):
+        flags.append(
+            "EXTREME_TARGET_UPSIDE"
+        )
+
+    if (
+        pd.notna(
+            row.get("days_to_next_earnings")
         )
         and 0
-        <= row["days_to_earnings"]
+        <= row.get("days_to_next_earnings")
+        <= 3
+    ):
+        flags.append(
+            "EARNINGS_WITHIN_3_DAYS"
+        )
+
+    if (
+        pd.notna(
+            row.get("days_to_next_earnings")
+        )
+        and 0
+        <= row.get("days_to_next_earnings")
         <= EARNINGS_WARNING_DAYS
     ):
         flags.append(
@@ -1172,13 +1278,28 @@ def make_risk_flags(
 
     if (
         pd.notna(
-            row["eps_down_30d"]
+            row.get(
+                "days_since_last_earnings",
+                np.nan,
+            )
+        )
+        and 0
+        <= row.get("days_since_last_earnings")
+        <= 5
+    ):
+        flags.append(
+            "POST_EARNINGS_PRICE_DISCOVERY"
+        )
+
+    if (
+        pd.notna(
+            row.get("eps_down_30d")
         )
         and pd.notna(
-            row["eps_up_30d"]
+            row.get("eps_up_30d")
         )
-        and row["eps_down_30d"]
-        > row["eps_up_30d"]
+        and row.get("eps_down_30d")
+        > row.get("eps_up_30d")
     ):
         flags.append(
             "NEGATIVE_EPS_REVISIONS"
@@ -1186,13 +1307,13 @@ def make_risk_flags(
 
     if (
         pd.notna(
-            row["current_price"]
+            row.get("current_price")
         )
         and pd.notna(
-            row["ma_200"]
+            row.get("ma_200")
         )
-        and row["current_price"]
-        < row["ma_200"]
+        and row.get("current_price")
+        < row.get("ma_200")
     ):
         flags.append(
             "BELOW_200D_MA"
@@ -1200,9 +1321,9 @@ def make_risk_flags(
 
     if (
         pd.notna(
-            row["volatility_annual_pct"]
+            row.get("volatility_annual_pct")
         )
-        and row["volatility_annual_pct"]
+        and row.get("volatility_annual_pct")
         > HIGH_VOLATILITY_THRESHOLD_PCT
     ):
         flags.append(
@@ -1211,23 +1332,74 @@ def make_risk_flags(
 
     if (
         pd.notna(
-            row["average_dollar_volume_20d"]
+            row.get("average_dollar_volume_20d")
         )
-        and row[
-            "average_dollar_volume_20d"
-        ]
+        and row.get("average_dollar_volume_20d")
+        < VERY_LOW_AVERAGE_DOLLAR_VOLUME
+    ):
+        flags.append(
+            "VERY_LOW_LIQUIDITY"
+        )
+
+    if (
+        pd.notna(
+            row.get("average_dollar_volume_20d")
+        )
+        and row.get("average_dollar_volume_20d")
         < LOW_AVERAGE_DOLLAR_VOLUME
     ):
         flags.append(
             "LOW_LIQUIDITY"
         )
 
-    critical_data_missing = (
-        pd.isna(row["current_price"])
-        or pd.isna(
-            row["selected_target"]
+    if (
+        pd.notna(
+            row.get(
+                "return_5d_pct",
+                np.nan,
+            )
         )
-        or row["rating_count"] == 0
+        and row["return_5d_pct"]
+        <= -10
+    ):
+        flags.append(
+            "SHARP_RECENT_SELLOFF"
+        )
+
+    if (
+        pd.notna(
+            row.get(
+                "return_5d_pct",
+                np.nan,
+            )
+        )
+        and row["return_5d_pct"]
+        >= 15
+    ):
+        flags.append(
+            "SHORT_TERM_OVEREXTENDED"
+        )
+
+    if (
+        pd.notna(
+            row.get(
+                "return_20d_pct",
+                np.nan,
+            )
+        )
+        and row["return_20d_pct"]
+        >= 40
+    ):
+        flags.append(
+            "EXTREME_OVEREXTENSION"
+        )
+
+    critical_data_missing = (
+        pd.isna(row.get("current_price"))
+        or pd.isna(
+            row.get("selected_target_price")
+        )
+        or row.get("rating_count", 0) < 5
     )
 
     history_error = str(
@@ -1341,7 +1513,7 @@ def build_analysis(
         default="MISSING",
     )
 
-    analysis["selected_target"] = (
+    analysis["selected_target_price"] = (
         analysis["target_median"]
         .combine_first(
             analysis["target_mean"]
@@ -1349,7 +1521,7 @@ def build_analysis(
     )
 
     analysis[
-        "selected_target_type"
+        "selected_target_source"
     ] = np.select(
         [
             analysis[
@@ -1366,6 +1538,14 @@ def build_analysis(
         default="MISSING",
     )
 
+    analysis["selected_target"] = (
+        analysis["selected_target_price"]
+    )
+
+    analysis["selected_target_type"] = (
+        analysis["selected_target_source"]
+    )
+
     analysis[
         "selected_target_upside_pct"
     ] = np.where(
@@ -1377,7 +1557,7 @@ def build_analysis(
         ].notna(),
         (
             analysis[
-                "selected_target"
+                "selected_target_price"
             ]
             / analysis[
                 "current_price"
@@ -1445,6 +1625,45 @@ def build_analysis(
         * 100,
         np.nan,
     )
+
+    analysis[
+        "hold_rating_pct"
+    ] = np.where(
+        analysis[
+            "rating_count"
+        ].gt(0),
+        analysis[
+            "hold"
+        ].fillna(0)
+        / analysis[
+            "rating_count"
+        ]
+        * 100,
+        np.nan,
+    )
+
+    sentiment_results = analysis.apply(
+        lambda row: score_analyst_sentiment(
+            row.get("strong_buy"),
+            row.get("buy"),
+            row.get("hold"),
+            row.get("sell"),
+            row.get("strong_sell"),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+
+    sentiment_results.columns = [
+        "lt_score_sentiment_preview",
+        "positive_rating_pct",
+        "negative_rating_pct",
+        "hold_rating_pct",
+        "recommendation_strength_score",
+    ]
+
+    for column in sentiment_results.columns:
+        analysis[column] = sentiment_results[column]
 
     analysis[
         "recommendation_score_simple"
@@ -1526,7 +1745,7 @@ def build_analysis(
             ]
         )
         / analysis[
-            "selected_target"
+            "selected_target_price"
         ]
         * 100,
         np.nan,
@@ -1550,6 +1769,24 @@ def build_analysis(
         ]
         - RUN_STARTED_AT_UTC
     ).dt.total_seconds() / 86_400
+
+    analysis[
+        "days_to_next_earnings"
+    ] = analysis[
+        "days_to_earnings"
+    ]
+
+    analysis[
+        "days_since_last_earnings"
+    ] = np.where(
+        analysis[
+            "days_to_next_earnings"
+        ].lt(0),
+        analysis[
+            "days_to_next_earnings"
+        ].abs(),
+        np.nan,
+    )
 
     analysis[
         "risk_flags"
@@ -1601,7 +1838,9 @@ def calculate_short_term_metrics(
             "distance_from_ma50_pct": np.nan,
             "drawdown_from_20d_high_pct": np.nan,
             "short_volatility_20d_pct": np.nan,
+            "volatility_20d_annualized_pct": np.nan,
             "negative_days_last_5": np.nan,
+            "worst_daily_return_5d_pct": np.nan,
         }
 
     latest_price = float(
@@ -1673,6 +1912,17 @@ def calculate_short_term_metrics(
         else np.nan
     )
 
+    worst_daily_return_5d_pct = (
+        float(
+            recent_returns
+            .tail(5)
+            .min()
+            * 100
+        )
+        if len(recent_returns) >= 5
+        else np.nan
+    )
+
     return {
         "short_price": latest_price,
         "return_1d_pct": (
@@ -1731,8 +1981,14 @@ def calculate_short_term_metrics(
         "short_volatility_20d_pct": (
             short_volatility
         ),
+        "volatility_20d_annualized_pct": (
+            short_volatility
+        ),
         "negative_days_last_5": (
             negative_days_last_5
+        ),
+        "worst_daily_return_5d_pct": (
+            worst_daily_return_5d_pct
         ),
     }
 
@@ -1986,559 +2242,414 @@ def calculate_dual_scores(
         errors="coerce",
     ).fillna(0)
 
-    # --------------------------------------------------------
-    # LONG-TERM SCORE
-    # --------------------------------------------------------
+    scores["price_vs_ma20_pct"] = scores[
+        "distance_from_ma20_pct"
+    ]
+    scores["price_vs_ma50_pct"] = scores[
+        "distance_from_ma50_pct"
+    ]
 
-    # 1. Analyst target upside — 30%
-    scores[
-        "lt_score_upside"
-    ] = linear_score(
-        scores[
-            "selected_target_upside_pct"
-        ],
-        minimum=0,
-        maximum=60,
-    ).fillna(0)
+    if "volatility_20d_annualized_pct" not in scores.columns:
+        scores["volatility_20d_annualized_pct"] = scores[
+            "short_volatility_20d_pct"
+        ]
 
-    # 2. Analyst sentiment — 25%
-    positive_pct = pd.to_numeric(
-        scores[
-            "positive_rating_pct"
-        ],
-        errors="coerce",
-    ).fillna(0)
-
-    recommendation_strength = (
-        (
-            pd.to_numeric(
-                scores[
-                    "recommendation_score_simple"
-                ],
-                errors="coerce",
-            )
-            .clip(
-                lower=-1,
-                upper=1,
-            )
-            + 1
-        )
-        / 2
-        * 100
+    sector_counts = scores.groupby(
+        "sector"
+    )["volatility_20d_annualized_pct"].transform(
+        "count"
+    )
+    scores["sector_volatility_percentile"] = (
+        scores.groupby("sector")[
+            "volatility_20d_annualized_pct"
+        ]
+        .rank(pct=True)
+        .mul(100)
+        .where(sector_counts >= 5)
     )
 
-    recommendation_strength = (
-        recommendation_strength
-        .where(
-            rating_count > 0,
-            0,
-        )
-        .fillna(0)
+    scores["volatility_scoring_method"] = np.where(
+        scores["sector_volatility_percentile"].notna(),
+        "SECTOR_RELATIVE",
+        "ABSOLUTE_FALLBACK",
     )
 
-    scores[
-        "lt_score_sentiment"
-    ] = (
-        0.70
-        * positive_pct.clip(
-            lower=0,
-            upper=100,
-        )
-        + 0.30
-        * recommendation_strength
-    )
+    scores["lt_score_upside"] = scores[
+        "selected_target_upside_pct"
+    ].apply(score_target_upside)
 
-    # 3. Analyst coverage — 10%
-    scores[
-        "lt_score_coverage"
-    ] = (
-        rating_count
-        .clip(
-            lower=0,
-            upper=40,
-        )
-        / 40
-        * 100
-    )
-
-    # 4. Target agreement — 15%
-    target_dispersion = pd.to_numeric(
-        scores[
-            "target_dispersion_pct"
-        ],
-        errors="coerce",
-    )
-
-    scores[
-        "lt_score_target_agreement"
-    ] = (
-        100
-        - target_dispersion.clip(
-            lower=0,
-            upper=100,
-        )
-    ).fillna(35)
-
-    # 5. EPS revisions — 15%
-    eps_up = pd.to_numeric(
-        scores["eps_up_30d"],
-        errors="coerce",
-    )
-
-    eps_down = pd.to_numeric(
-        scores["eps_down_30d"],
-        errors="coerce",
-    )
-
-    eps_missing = (
-        eps_up.isna()
-        & eps_down.isna()
-    )
-
-    eps_up_filled = (
-        eps_up.fillna(0)
-    )
-
-    eps_down_filled = (
-        eps_down.fillna(0)
-    )
-
-    total_eps_revisions = (
-        eps_up_filled
-        + eps_down_filled
-    )
-
-    scores[
-        "lt_score_eps_revisions"
-    ] = np.where(
-        eps_missing,
-        40,
-        np.where(
-            total_eps_revisions > 0,
-            eps_up_filled
-            / total_eps_revisions
-            * 100,
-            50,
+    sentiment_results = scores.apply(
+        lambda row: score_analyst_sentiment(
+            row.get("strong_buy"),
+            row.get("buy"),
+            row.get("hold"),
+            row.get("sell"),
+            row.get("strong_sell"),
         ),
+        axis=1,
+        result_type="expand",
+    )
+    sentiment_results.columns = [
+        "lt_score_sentiment",
+        "positive_rating_pct",
+        "negative_rating_pct",
+        "hold_rating_pct",
+        "recommendation_strength_score",
+    ]
+    for column in sentiment_results.columns:
+        scores[column] = sentiment_results[column]
+
+    eps_results = scores.apply(
+        lambda row: score_eps_revisions(
+            row.get("eps_up_30d"),
+            row.get("eps_down_30d"),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    scores["lt_score_eps_revisions"] = eps_results[0]
+    scores["eps_revision_data_available"] = eps_results[1]
+
+    scores["lt_score_target_agreement"] = scores[
+        "target_dispersion_pct"
+    ].apply(score_target_agreement)
+
+    scores["lt_score_long_trend"] = scores[
+        "price_vs_200d_ma_pct"
+    ].apply(score_long_term_trend)
+
+    scores["analyst_coverage_confidence"] = rating_count.apply(
+        calculate_coverage_confidence
     )
 
-    # 6. 200-day trend — 5%
-    price_vs_200 = pd.to_numeric(
-        scores[
-            "price_vs_200d_ma_pct"
-        ],
+    long_term_weights = {
+        "upside": 0.35,
+        "sentiment": 0.30,
+        "eps_revisions": 0.20,
+        "target_agreement": 0.10,
+        "long_trend": 0.05,
+    }
+
+    long_results = scores.apply(
+        lambda row: weighted_score_available(
+            {
+                "upside": row.get("lt_score_upside"),
+                "sentiment": row.get("lt_score_sentiment"),
+                "eps_revisions": row.get("lt_score_eps_revisions"),
+                "target_agreement": row.get("lt_score_target_agreement"),
+                "long_trend": row.get("lt_score_long_trend"),
+            },
+            long_term_weights,
+        ),
+        axis=1,
+        result_type="expand",
+    )
+
+    scores["analyst_long_term_raw_score"] = long_results[0]
+    scores["analyst_long_term_data_coverage_pct"] = (
+        long_results[1] * 100
+    )
+
+    long_term_critical_missing = (
+        scores["current_price"].isna()
+        | scores["selected_target_price"].isna()
+        | rating_count.lt(5)
+    )
+
+    scores["analyst_long_term_status"] = RANKED
+    scores.loc[
+        scores["analyst_long_term_data_coverage_pct"].lt(
+            100
+        ),
+        "analyst_long_term_status",
+    ] = PARTIAL_DATA
+    scores.loc[
+        long_term_critical_missing
+        | scores["analyst_long_term_data_coverage_pct"].lt(
+            MIN_ANALYST_LONG_TERM_COVERAGE * 100
+        ),
+        "analyst_long_term_status",
+    ] = INSUFFICIENT_DATA
+
+    scores.loc[
+        scores["analyst_long_term_status"].eq(
+            INSUFFICIENT_DATA
+        ),
+        "analyst_long_term_raw_score",
+    ] = np.nan
+
+    scores["long_term_risk_penalty"] = 0.0
+    avg_dollar_volume = pd.to_numeric(
+        scores["average_dollar_volume_20d"],
         errors="coerce",
     )
-
-    scores[
-        "lt_score_long_trend"
-    ] = np.select(
+    scores["long_term_risk_penalty"] += np.select(
         [
-            price_vs_200 < -30,
-
-            (
-                price_vs_200 >= -30
-            )
-            & (
-                price_vs_200 <= 20
-            ),
-
-            (
-                price_vs_200 > 20
-            )
-            & (
-                price_vs_200 <= 50
-            ),
-
-            price_vs_200 > 50,
+            avg_dollar_volume.lt(VERY_LOW_AVERAGE_DOLLAR_VOLUME),
+            avg_dollar_volume.lt(LOW_AVERAGE_DOLLAR_VOLUME),
+            avg_dollar_volume.lt(20_000_000),
         ],
-        [
-            0,
-
-            (
-                price_vs_200 + 30
-            )
-            / 50
-            * 100,
-
-            (
-                100
-                - (
-                    price_vs_200 - 20
-                )
-                / 30
-                * 30
-            ),
-
-            60,
-        ],
-        default=50,
+        [8, 5, 3],
+        default=0,
     )
-
-    scores[
-        "long_term_base_score"
-    ] = (
-        0.30
-        * scores[
-            "lt_score_upside"
-        ]
-        + 0.25
-        * scores[
-            "lt_score_sentiment"
-        ]
-        + 0.10
-        * scores[
-            "lt_score_coverage"
-        ]
-        + 0.15
-        * scores[
-            "lt_score_target_agreement"
-        ]
-        + 0.15
-        * scores[
-            "lt_score_eps_revisions"
-        ]
-        + 0.05
-        * scores[
-            "lt_score_long_trend"
-        ]
-    )
-
-    risk_text = (
-        scores["risk_flags"]
-        .fillna("")
-        .astype(str)
-    )
-
-    scores[
-        "long_term_risk_penalty"
-    ] = 0.0
-
-    scores[
-        "long_term_risk_penalty"
-    ] += np.where(
-        risk_text.str.contains(
-            "LOW_LIQUIDITY",
-            regex=False,
-        ),
-        10,
-        0,
-    )
-
-    scores[
-        "long_term_risk_penalty"
-    ] += np.where(
-        risk_text.str.contains(
-            "HIGH_VOLATILITY",
-            regex=False,
+    scores["long_term_risk_penalty"] += np.where(
+        scores["volatility_annual_pct"].gt(
+            HIGH_VOLATILITY_THRESHOLD_PCT
         ),
         2,
         0,
     )
-
-    scores["long_term_score"] = (
-        scores[
-            "long_term_base_score"
-        ]
-        - scores[
-            "long_term_risk_penalty"
-        ]
-    ).clip(
-        lower=0,
-        upper=100,
+    scores["long_term_risk_penalty"] += np.where(
+        scores["selected_target_upside_pct"].ge(80),
+        2,
+        0,
     )
-
-    long_term_missing = (
-        scores["current_price"].isna()
-        | scores[
-            "selected_target"
-        ].isna()
-        | rating_count.lt(5)
-    )
-
-    scores.loc[
-        long_term_missing,
-        "long_term_score",
-    ] = 0
-
-    # --------------------------------------------------------
-    # SHORT-TERM ENTRY SCORE
-    # --------------------------------------------------------
-
-    # 1. 5-day and 20-day momentum — 25%
-    score_5d_momentum = linear_score(
-        scores["return_5d_pct"],
-        minimum=-15,
-        maximum=8,
-    )
-
-    score_20d_momentum = linear_score(
-        scores["return_20d_pct"],
-        minimum=-25,
-        maximum=15,
-    )
-
-    scores[
-        "st_score_momentum"
-    ] = (
-        0.65
-        * score_5d_momentum
-        + 0.35
-        * score_20d_momentum
-    ).fillna(50)
-
-    # 2. Moving average alignment — 20%
-    score_ma20 = (
-        scores[
-            "distance_from_ma20_pct"
-        ]
-        .apply(
-            ma_distance_score
-        )
-    )
-
-    score_ma50 = (
-        scores[
-            "distance_from_ma50_pct"
-        ]
-        .apply(
-            ma_distance_score
-        )
-    )
-
-    scores[
-        "st_score_ma_alignment"
-    ] = (
-        0.65
-        * score_ma20
-        + 0.35
-        * score_ma50
-    )
-
-    # 3. Recent selloff stability — 20%
-    score_two_day_stability = (
-        linear_score(
-            scores["return_2d_pct"],
-            minimum=-15,
-            maximum=2,
-        )
-    )
-
-    negative_days_score = (
-        100
-        - (
-            pd.to_numeric(
-                scores[
-                    "negative_days_last_5"
-                ],
-                errors="coerce",
-            )
-            .clip(
-                lower=0,
-                upper=5,
-            )
-            / 5
-            * 100
-        )
-    )
-
-    scores[
-        "st_score_selloff_stability"
-    ] = (
-        0.75
-        * score_two_day_stability
-        + 0.25
-        * negative_days_score
-    ).fillna(50)
-
-    # 4. Pullback quality — 15%
-    scores[
-        "st_score_pullback_quality"
-    ] = (
-        scores[
-            "drawdown_from_20d_high_pct"
-        ]
-        .apply(
-            calculate_pullback_score
-        )
-        .fillna(50)
-    )
-
-    # 5. Volatility — 15%
-    short_volatility = pd.to_numeric(
-        scores[
-            "short_volatility_20d_pct"
-        ],
-        errors="coerce",
-    )
-
-    scores[
-        "st_score_volatility"
-    ] = (
-        (
-            75
-            - short_volatility
-        )
-        / (
-            75 - 20
-        )
-        * 100
-    ).clip(
-        lower=0,
-        upper=100,
-    ).fillna(40)
-
-    # 6. Earnings timing — 5%
-    scores[
-        "st_score_earnings_timing"
-    ] = (
-        scores[
-            "days_to_earnings"
-        ]
-        .apply(
-            earnings_timing_score
-        )
-    )
-
-    scores[
-        "short_term_entry_score"
-    ] = (
-        0.25
-        * scores[
-            "st_score_momentum"
-        ]
-        + 0.20
-        * scores[
-            "st_score_ma_alignment"
-        ]
-        + 0.20
-        * scores[
-            "st_score_selloff_stability"
-        ]
-        + 0.15
-        * scores[
-            "st_score_pullback_quality"
-        ]
-        + 0.15
-        * scores[
-            "st_score_volatility"
-        ]
-        + 0.05
-        * scores[
-            "st_score_earnings_timing"
-        ]
-    )
-
-    short_term_missing = (
-        scores[
-            "return_5d_pct"
-        ].isna()
-        | scores[
-            "return_20d_pct"
-        ].isna()
-        | scores[
-            "distance_from_ma20_pct"
-        ].isna()
-        | scores[
-            "short_volatility_20d_pct"
-        ].isna()
-    )
-
-    scores.loc[
-        short_term_missing,
-        "short_term_entry_score",
-    ] = 0
-
-    scores[
-        "short_term_entry_score"
-    ] -= np.where(
-        risk_text.str.contains(
-            "LOW_LIQUIDITY",
-            regex=False,
+    scores["long_term_risk_penalty"] += np.where(
+        scores["target_dispersion_pct"].gt(
+            HIGH_TARGET_DISPERSION_THRESHOLD_PCT
         ),
-        15,
+        3,
         0,
     )
 
-    scores[
+    scores["analyst_long_term_score"] = (
+        scores["analyst_long_term_raw_score"]
+        * scores["analyst_coverage_confidence"]
+        - scores["long_term_risk_penalty"]
+    ).clip(lower=0, upper=100)
+    scores.loc[
+        scores["analyst_long_term_status"].eq(
+            INSUFFICIENT_DATA
+        ),
+        "analyst_long_term_score",
+    ] = np.nan
+    scores["long_term_score"] = scores[
+        "analyst_long_term_score"
+    ]
+
+    scores["st_score_momentum"] = scores.apply(
+        lambda row: score_momentum(
+            row.get("return_5d_pct"),
+            row.get("return_20d_pct"),
+        ),
+        axis=1,
+    )
+    scores["st_score_ma_alignment"] = scores.apply(
+        lambda row: score_ma_alignment(
+            row.get("price_vs_ma20_pct"),
+            row.get("price_vs_ma50_pct"),
+        ),
+        axis=1,
+    )
+    scores["st_score_pullback_quality"] = scores[
+        "drawdown_from_20d_high_pct"
+    ].apply(score_pullback_quality)
+    scores["st_score_selloff_stability"] = scores.apply(
+        lambda row: score_selloff_stability(
+            row.get("return_2d_pct"),
+            row.get("negative_days_last_5"),
+            row.get("worst_daily_return_5d_pct"),
+        ),
+        axis=1,
+    )
+    scores["st_score_volatility"] = np.where(
+        scores["sector_volatility_percentile"].notna(),
+        scores["sector_volatility_percentile"].apply(
+            score_sector_volatility_percentile
+        ),
+        scores["volatility_20d_annualized_pct"].apply(
+            score_absolute_volatility
+        ),
+    )
+    scores["st_score_earnings_timing"] = scores.apply(
+        lambda row: score_earnings_timing(
+            row.get("days_to_next_earnings"),
+            row.get("days_since_last_earnings"),
+        ),
+        axis=1,
+    )
+
+    short_term_weights = {
+        "momentum": 0.25,
+        "ma_alignment": 0.25,
+        "pullback_quality": 0.20,
+        "selloff_stability": 0.15,
+        "volatility": 0.10,
+        "earnings_timing": 0.05,
+    }
+
+    short_results = scores.apply(
+        lambda row: weighted_score_available(
+            {
+                "momentum": row.get("st_score_momentum"),
+                "ma_alignment": row.get("st_score_ma_alignment"),
+                "pullback_quality": row.get("st_score_pullback_quality"),
+                "selloff_stability": row.get("st_score_selloff_stability"),
+                "volatility": row.get("st_score_volatility"),
+                "earnings_timing": row.get("st_score_earnings_timing"),
+            },
+            short_term_weights,
+        ),
+        axis=1,
+        result_type="expand",
+    )
+
+    scores["short_term_raw_score"] = short_results[0]
+    scores["short_term_data_coverage_pct"] = (
+        short_results[1] * 100
+    )
+
+    short_term_critical_missing = (
+        scores["current_price"].isna()
+        | scores["return_5d_pct"].isna()
+        | scores["return_20d_pct"].isna()
+        | scores["price_vs_ma20_pct"].isna()
+        | scores["price_vs_ma50_pct"].isna()
+        | scores["volatility_20d_annualized_pct"].isna()
+        | scores["drawdown_from_20d_high_pct"].isna()
+    )
+
+    scores["short_term_status"] = RANKED
+    scores.loc[
+        scores["short_term_data_coverage_pct"].lt(100),
+        "short_term_status",
+    ] = PARTIAL_DATA
+    scores.loc[
+        short_term_critical_missing
+        | scores["short_term_data_coverage_pct"].lt(
+            MIN_SHORT_TERM_COVERAGE * 100
+        ),
+        "short_term_status",
+    ] = INSUFFICIENT_DATA
+
+    scores.loc[
+        scores["short_term_status"].eq(INSUFFICIENT_DATA),
+        "short_term_raw_score",
+    ] = np.nan
+
+    scores["short_term_risk_penalty"] = 0.0
+    scores["short_term_risk_penalty"] += np.where(
+        avg_dollar_volume.lt(VERY_LOW_AVERAGE_DOLLAR_VOLUME),
+        10,
+        0,
+    )
+    scores["short_term_risk_penalty"] += np.where(
+        scores["return_5d_pct"].le(-10),
+        5,
+        0,
+    )
+    scores["short_term_risk_penalty"] += np.where(
+        scores["return_20d_pct"].ge(40),
+        5,
+        0,
+    )
+
+    scores["short_term_entry_score"] = (
+        scores["short_term_raw_score"]
+        - scores["short_term_risk_penalty"]
+    ).clip(lower=0, upper=100)
+    scores.loc[
+        scores["short_term_status"].eq(INSUFFICIENT_DATA),
+        "short_term_entry_score",
+    ] = np.nan
+
+    scores["risk_flags"] = scores.apply(
+        make_risk_flags,
+        axis=1,
+    )
+
+    scores["analyst_long_term_category"] = scores[
+        "analyst_long_term_score"
+    ].apply(assign_long_term_category)
+    scores["long_term_category"] = scores[
+        "analyst_long_term_category"
+    ]
+    scores["short_term_category"] = scores[
         "short_term_entry_score"
-    ] = (
-        scores[
-            "short_term_entry_score"
-        ]
-        .clip(
-            lower=0,
-            upper=100,
-        )
+    ].apply(assign_short_term_category)
+
+    profiles = scores.apply(
+        lambda row: assign_candidate_profile(
+            row.get("analyst_long_term_score"),
+            row.get("short_term_entry_score"),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    scores["candidate_profile"] = profiles[0]
+    scores["candidate_profile_explanation"] = profiles[1]
+
+    scores["combined_score"] = np.where(
+        scores["analyst_long_term_score"].notna()
+        & scores["short_term_entry_score"].notna(),
+        0.60 * scores["analyst_long_term_score"]
+        + 0.40 * scores["short_term_entry_score"],
+        np.nan,
     )
 
-    # --------------------------------------------------------
-    # CATEGORIES AND RANKS
-    # --------------------------------------------------------
-
-    scores[
-        "long_term_category"
-    ] = pd.cut(
-        scores["long_term_score"],
-        bins=[
-            -0.01,
-            44.99,
-            59.99,
-            74.99,
-            100,
+    scores["overall_data_quality"] = np.select(
+        [
+            scores["analyst_long_term_status"].eq(RANKED)
+            & scores["short_term_status"].eq(RANKED)
+            & scores["analyst_long_term_data_coverage_pct"].ge(90)
+            & scores["short_term_data_coverage_pct"].ge(90),
+            scores["analyst_long_term_status"].isin(
+                [RANKED, PARTIAL_DATA]
+            )
+            & scores["short_term_status"].isin(
+                [RANKED, PARTIAL_DATA]
+            ),
+            scores["analyst_long_term_status"].isin(
+                [RANKED, PARTIAL_DATA]
+            )
+            | scores["short_term_status"].isin(
+                [RANKED, PARTIAL_DATA]
+            ),
         ],
-        labels=[
-            "WEAK",
-            "NEUTRAL",
-            "POSITIVE",
-            "STRONG",
-        ],
+        ["HIGH", "MEDIUM", "LOW"],
+        default="INSUFFICIENT",
     )
 
-    scores[
-        "short_term_category"
-    ] = pd.cut(
-        scores[
-            "short_term_entry_score"
-        ],
-        bins=[
-            -0.01,
-            39.99,
-            59.99,
-            74.99,
-            100,
-        ],
-        labels=[
-            "WAIT / AVOID",
-            "NEUTRAL",
-            "WATCH",
-            "FAVORABLE ENTRY",
-        ],
+    drivers = scores.apply(
+        format_driver_text,
+        axis=1,
+        result_type="expand",
+    )
+    scores["top_positive_drivers"] = drivers[0]
+    scores["top_negative_drivers"] = drivers[1]
+
+    long_rankable = scores["analyst_long_term_status"].isin(
+        [RANKED, PARTIAL_DATA]
+    )
+    short_rankable = scores["short_term_status"].isin(
+        [RANKED, PARTIAL_DATA]
     )
 
-    scores[
-        "long_term_rank"
-    ] = (
-        scores["long_term_score"]
-        .rank(
-            method="min",
-            ascending=False,
-        )
-        .astype("Int64")
+    scores["long_term_rank"] = pd.Series(
+        pd.NA,
+        index=scores.index,
+        dtype="Int64",
     )
+    scores.loc[
+        long_rankable,
+        "long_term_rank",
+    ] = scores.loc[
+        long_rankable,
+        "analyst_long_term_score",
+    ].rank(method="min", ascending=False).astype("Int64")
 
-    scores[
-        "short_term_rank"
-    ] = (
-        scores[
-            "short_term_entry_score"
-        ]
-        .rank(
-            method="min",
-            ascending=False,
-        )
-        .astype("Int64")
+    scores["short_term_rank"] = pd.Series(
+        pd.NA,
+        index=scores.index,
+        dtype="Int64",
     )
+    scores.loc[
+        short_rankable,
+        "short_term_rank",
+    ] = scores.loc[
+        short_rankable,
+        "short_term_entry_score",
+    ].rank(method="min", ascending=False).astype("Int64")
 
     return scores
 
@@ -2553,41 +2664,44 @@ def create_rankings(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
 ]:
 
+    long_rankable = dual_scores[
+        "analyst_long_term_status"
+    ].isin([RANKED, PARTIAL_DATA])
+    short_rankable = dual_scores[
+        "short_term_status"
+    ].isin([RANKED, PARTIAL_DATA])
+
     long_term_ranking = (
-        dual_scores
+        dual_scores.loc[long_rankable]
         .sort_values(
             [
-                "long_term_score",
+                "analyst_long_term_score",
                 "short_term_entry_score",
                 "positive_rating_pct",
                 "rating_count",
             ],
-            ascending=[
-                False,
-                False,
-                False,
-                False,
-            ],
+            ascending=[False, False, False, False],
             na_position="last",
         )
         .reset_index(drop=True)
     )
 
     short_term_ranking = (
-        dual_scores
+        dual_scores.loc[short_rankable]
         .sort_values(
             [
                 "short_term_entry_score",
-                "long_term_score",
+                "analyst_long_term_score",
                 "positive_rating_pct",
             ],
-            ascending=[
-                False,
-                False,
-                False,
-            ],
+            ascending=[False, False, False],
             na_position="last",
         )
         .reset_index(drop=True)
@@ -2595,30 +2709,19 @@ def create_rankings(
 
     combined_candidates = (
         dual_scores.loc[
-            dual_scores[
-                "long_term_score"
-            ].ge(60)
-            & dual_scores[
-                "short_term_entry_score"
-            ].ge(60)
-            & ~dual_scores[
-                "has_partial_data"
-            ]
+            dual_scores["analyst_long_term_score"].ge(60)
+            & dual_scores["short_term_entry_score"].ge(60)
+            & dual_scores["analyst_long_term_status"].isin(
+                [RANKED, PARTIAL_DATA]
+            )
+            & dual_scores["short_term_status"].isin(
+                [RANKED, PARTIAL_DATA]
+            )
+            & dual_scores["analyst_long_term_data_coverage_pct"].ge(80)
+            & dual_scores["short_term_data_coverage_pct"].ge(80)
+            & dual_scores["overall_data_quality"].ne("INSUFFICIENT")
         ]
         .copy()
-    )
-
-    combined_candidates[
-        "combined_score"
-    ] = (
-        0.60
-        * combined_candidates[
-            "long_term_score"
-        ]
-        + 0.40
-        * combined_candidates[
-            "short_term_entry_score"
-        ]
     )
 
     combined_candidates = (
@@ -2626,14 +2729,10 @@ def create_rankings(
         .sort_values(
             [
                 "combined_score",
-                "long_term_score",
+                "analyst_long_term_score",
                 "short_term_entry_score",
             ],
-            ascending=[
-                False,
-                False,
-                False,
-            ],
+            ascending=[False, False, False],
         )
         .reset_index(drop=True)
     )
@@ -2641,18 +2740,35 @@ def create_rankings(
     combined_candidates.insert(
         0,
         "combined_rank",
-        range(
-            1,
-            len(
-                combined_candidates
-            ) + 1,
-        ),
+        range(1, len(combined_candidates) + 1),
     )
+
+    strong_candidates = combined_candidates.loc[
+        combined_candidates["candidate_profile"].eq("STRONG CANDIDATE")
+    ].copy()
+    wait_for_entry = dual_scores.loc[
+        dual_scores["candidate_profile"].eq("ATTRACTIVE, WAIT FOR ENTRY")
+    ].copy()
+    tactical_candidates = combined_candidates.loc[
+        combined_candidates["candidate_profile"].eq("TACTICAL CANDIDATE")
+    ].copy()
+    momentum_only = dual_scores.loc[
+        dual_scores["candidate_profile"].eq("MOMENTUM ONLY")
+    ].copy()
+    insufficient_data = dual_scores.loc[
+        dual_scores["analyst_long_term_status"].eq(INSUFFICIENT_DATA)
+        | dual_scores["short_term_status"].eq(INSUFFICIENT_DATA)
+    ].copy()
 
     return (
         long_term_ranking,
         short_term_ranking,
         combined_candidates,
+        strong_candidates,
+        wait_for_entry,
+        tactical_candidates,
+        momentum_only,
+        insufficient_data,
     )
 
 
@@ -2686,8 +2802,12 @@ def print_rankings(
         "short_term_rank",
         "symbol",
         "company_name",
-        "long_term_score",
-        "long_term_category",
+        "analyst_long_term_raw_score",
+        "analyst_long_term_score",
+        "analyst_long_term_category",
+        "analyst_long_term_status",
+        "analyst_coverage_confidence",
+        "analyst_long_term_data_coverage_pct",
         "short_term_entry_score",
         "short_term_category",
         "current_price",
@@ -2706,8 +2826,8 @@ def print_rankings(
         "company_name",
         "short_term_entry_score",
         "short_term_category",
-        "long_term_score",
-        "long_term_category",
+        "analyst_long_term_score",
+        "analyst_long_term_category",
         "current_price",
         "return_1d_pct",
         "return_2d_pct",
@@ -2723,8 +2843,9 @@ def print_rankings(
         "symbol",
         "company_name",
         "combined_score",
-        "long_term_score",
+        "analyst_long_term_score",
         "short_term_entry_score",
+        "candidate_profile",
         "current_price",
         "selected_target_upside_pct",
         "positive_rating_pct",
@@ -2736,7 +2857,7 @@ def print_rankings(
 
     print("\n")
     print("=" * 120)
-    print("UZUN VADELİ POTANSİYEL SIRALAMASI")
+    print("ANALYST-BASED UZUN VADELİ POTANSİYEL SIRALAMASI")
     print("=" * 120)
 
     print(
@@ -2822,17 +2943,31 @@ def print_ticker_details(
 
     row = result.iloc[0]
 
+    def display_value(
+        value: Any,
+        suffix: str = "",
+    ) -> str:
+
+        number = safe_float(value)
+        if pd.isna(number):
+            if pd.isna(value):
+                return "N/A"
+            return str(value)
+        return f"{number:,.2f}{suffix}"
+
     print(
         f"{row['symbol']} — "
         f"{row['company_name']}"
     )
 
     print(
-        f"Uzun vade: "
+        f"Analyst-based uzun vade: "
         f"rank {row['long_term_rank']}"
         f"/{len(dual_scores)}, "
-        f"score {row['long_term_score']:.2f}, "
-        f"{row['long_term_category']}"
+        f"raw {display_value(row['analyst_long_term_raw_score'])}, "
+        f"adjusted {display_value(row['analyst_long_term_score'])}, "
+        f"{row['analyst_long_term_category']}, "
+        f"{row['analyst_long_term_status']}"
     )
 
     print(
@@ -2840,30 +2975,49 @@ def print_ticker_details(
         f"rank {row['short_term_rank']}"
         f"/{len(dual_scores)}, "
         f"score "
-        f"{row['short_term_entry_score']:.2f}, "
-        f"{row['short_term_category']}"
+        f"raw {display_value(row['short_term_raw_score'])}, "
+        f"entry {display_value(row['short_term_entry_score'])}, "
+        f"{row['short_term_category']}, "
+        f"{row['short_term_status']}"
+    )
+
+    print(
+        f"Analyst coverage confidence: "
+        f"{display_value(row['analyst_coverage_confidence'])}"
+    )
+
+    print(
+        f"Data coverage: long "
+        f"{display_value(row['analyst_long_term_data_coverage_pct'], '%')}, "
+        f"short {display_value(row['short_term_data_coverage_pct'], '%')}"
+    )
+
+    print(
+        f"Combined: "
+        f"{display_value(row['combined_score'])}, "
+        f"{row['candidate_profile']}"
     )
 
     print(
         f"Current price: "
-        f"{row['current_price']:,.2f}"
+        f"{display_value(row['current_price'])}"
     )
 
     print(
         f"Selected target: "
-        f"{row['selected_target']:,.2f}"
+        f"{display_value(row['selected_target_price'])}"
     )
 
     print(
         f"Target upside: "
-        f"{row['selected_target_upside_pct']:.2f}%"
+        f"{display_value(row['selected_target_upside_pct'], '%')}"
     )
 
     print(
         f"Positive ratings: "
-        f"{row['positive_rating_pct']:.2f}% "
+        f"{display_value(row['positive_rating_pct'], '%')} "
         f"from "
-        f"{int(row['rating_count'])} ratings"
+        f"{display_value(row['rating_count'])} ratings"
     )
 
     print(
@@ -2871,16 +3025,36 @@ def print_ticker_details(
         f"{row['risk_flags'] or 'None'}"
     )
 
+    print(
+        f"Positive drivers: "
+        f"{row['top_positive_drivers']}"
+    )
+
+    print(
+        f"Negative drivers: "
+        f"{row['top_negative_drivers']}"
+    )
+
     detail_columns = [
         "symbol",
         "company_name",
         "sector",
         "long_term_rank",
-        "long_term_score",
-        "long_term_category",
+        "analyst_long_term_raw_score",
+        "analyst_long_term_score",
+        "analyst_long_term_category",
+        "analyst_long_term_status",
+        "analyst_coverage_confidence",
+        "analyst_long_term_data_coverage_pct",
         "short_term_rank",
+        "short_term_raw_score",
         "short_term_entry_score",
         "short_term_category",
+        "short_term_status",
+        "short_term_data_coverage_pct",
+        "combined_score",
+        "candidate_profile",
+        "candidate_profile_explanation",
         "current_price",
         "current_price_source",
         "price_as_of",
@@ -2888,7 +3062,8 @@ def print_ticker_details(
         "target_mean",
         "target_median",
         "target_high",
-        "selected_target",
+        "selected_target_price",
+        "selected_target_source",
         "selected_target_upside_pct",
         "strong_buy",
         "buy",
@@ -2897,6 +3072,8 @@ def print_ticker_details(
         "strong_sell",
         "positive_rating_pct",
         "negative_rating_pct",
+        "hold_rating_pct",
+        "recommendation_strength_score",
         "rating_count",
         "target_dispersion_pct",
         "eps_up_7d",
@@ -2914,6 +3091,8 @@ def print_ticker_details(
         "negative_days_last_5",
         "next_earnings_date",
         "days_to_earnings",
+        "days_to_next_earnings",
+        "days_since_last_earnings",
         "lt_score_upside",
         "lt_score_sentiment",
         "lt_score_coverage",
@@ -2922,6 +3101,8 @@ def print_ticker_details(
         "lt_score_long_trend",
         "long_term_base_score",
         "long_term_risk_penalty",
+        "short_term_raw_score",
+        "short_term_risk_penalty",
         "st_score_momentum",
         "st_score_ma_alignment",
         "st_score_selloff_stability",
@@ -2929,6 +3110,8 @@ def print_ticker_details(
         "st_score_volatility",
         "st_score_earnings_timing",
         "risk_flags",
+        "top_positive_drivers",
+        "top_negative_drivers",
         "data_errors",
         "data_fetched_at_utc",
     ]
@@ -2964,6 +3147,20 @@ def prepare_dataframe_for_excel(
 
     excel_frame = frame.copy()
 
+    def normalize_excel_value(
+        value: Any,
+    ) -> Any:
+
+        if isinstance(value, pd.Timestamp):
+            if value.tzinfo is not None:
+                return (
+                    value
+                    .tz_convert("UTC")
+                    .tz_localize(None)
+                )
+
+        return value
+
     for column in excel_frame.columns:
         if isinstance(
             excel_frame[column].dtype,
@@ -2975,7 +3172,184 @@ def prepare_dataframe_for_excel(
                 .dt.tz_localize(None)
             )
 
+        elif excel_frame[column].dtype == "object":
+            excel_frame[column] = (
+                excel_frame[column]
+                .map(normalize_excel_value)
+            )
+
     return excel_frame
+
+
+def build_methodology_table() -> pd.DataFrame:
+
+    rows = [
+        ("model_version", SCORING_MODEL_VERSION),
+        (
+            "purpose",
+            "Research screener; not a buy/sell recommendation.",
+        ),
+        (
+            "analyst_long_term_score",
+            "Confidence-adjusted analyst-based score: target upside 35%, sentiment 30%, EPS revisions 20%, target agreement 10%, MA200 trend 5%.",
+        ),
+        (
+            "short_term_entry_score",
+            "Technical entry score: momentum 25%, MA alignment 25%, pullback 20%, selloff stability 15%, volatility 10%, earnings timing 5%.",
+        ),
+        (
+            "missing_data",
+            "Critical missing data produces NaN and INSUFFICIENT_DATA; optional missing components are excluded with dynamic weight normalization.",
+        ),
+        (
+            "confidence",
+            "Analyst coverage affects confidence, not raw attractiveness; fewer than 5 ratings is insufficient.",
+        ),
+        (
+            "categories",
+            "Long term: WEAK <45, NEUTRAL <60, POSITIVE <75, STRONG >=75. Short term: WAIT/AVOID <40, NEUTRAL <60, WATCH <75, FAVORABLE ENTRY >=75.",
+        ),
+        (
+            "limitations",
+            "Scores can be affected by stale analyst targets, delayed revisions, market shocks, sector events, and incomplete source data.",
+        ),
+    ]
+
+    return pd.DataFrame(
+        rows,
+        columns=["topic", "description"],
+    )
+
+
+def build_run_metadata(
+    constituents: pd.DataFrame,
+    price_metrics: pd.DataFrame,
+    analyst_data: pd.DataFrame,
+    dual_scores: pd.DataFrame,
+) -> pd.DataFrame:
+
+    metadata = {
+        "run_timestamp_utc": RUN_STARTED_AT_UTC,
+        "scoring_model_version": SCORING_MODEL_VERSION,
+        "sp500_constituents": len(constituents),
+        "successful_price_rows": int(
+            price_metrics["history_price"].notna().sum()
+        ),
+        "complete_price_history_symbols": int(
+            dual_scores["short_term_status"]
+            .isin([RANKED, PARTIAL_DATA])
+            .sum()
+        ),
+        "analyst_data_rows": len(analyst_data),
+        "ranked_long_term": int(
+            dual_scores["analyst_long_term_status"]
+            .isin([RANKED, PARTIAL_DATA])
+            .sum()
+        ),
+        "ranked_short_term": int(
+            dual_scores["short_term_status"]
+            .isin([RANKED, PARTIAL_DATA])
+            .sum()
+        ),
+        "partial_data_rows": int(
+            (
+                dual_scores["analyst_long_term_status"].eq(PARTIAL_DATA)
+                | dual_scores["short_term_status"].eq(PARTIAL_DATA)
+            ).sum()
+        ),
+        "insufficient_data_rows": int(
+            dual_scores["overall_data_quality"]
+            .eq("INSUFFICIENT")
+            .sum()
+        ),
+        "data_sources": "GitHub datasets S&P 500 constituents; Yahoo Finance via yfinance.",
+        "script_version": SCORING_MODEL_VERSION,
+    }
+
+    return pd.DataFrame(
+        metadata.items(),
+        columns=["field", "value"],
+    )
+
+
+def validate_scores(
+    dual_scores: pd.DataFrame,
+    combined_candidates: pd.DataFrame,
+) -> None:
+
+    score_columns = [
+        "analyst_long_term_raw_score",
+        "analyst_long_term_score",
+        "short_term_raw_score",
+        "short_term_entry_score",
+        "combined_score",
+    ]
+
+    outside_range = 0
+    for column in score_columns:
+        values = pd.to_numeric(
+            dual_scores[column],
+            errors="coerce",
+        )
+        outside_range += int(
+            (
+                values.notna()
+                & ~values.between(0, 100)
+            ).sum()
+        )
+
+    invalid_long = int(
+        (
+            dual_scores["analyst_long_term_status"]
+            .eq(INSUFFICIENT_DATA)
+            & dual_scores["analyst_long_term_score"].notna()
+        ).sum()
+    )
+    invalid_short = int(
+        (
+            dual_scores["short_term_status"]
+            .eq(INSUFFICIENT_DATA)
+            & dual_scores["short_term_entry_score"].notna()
+        ).sum()
+    )
+    invalid_combined = int(
+        (
+            ~(
+                combined_candidates["analyst_long_term_score"].ge(60)
+                & combined_candidates["short_term_entry_score"].ge(60)
+                & combined_candidates[
+                    "analyst_long_term_data_coverage_pct"
+                ].ge(80)
+                & combined_candidates[
+                    "short_term_data_coverage_pct"
+                ].ge(80)
+            )
+        ).sum()
+    )
+
+    if outside_range or invalid_long or invalid_short or invalid_combined:
+        raise AssertionError(
+            "Validation failed: "
+            f"{outside_range} scores outside 0-100, "
+            f"{invalid_long} invalid long-term insufficient rows, "
+            f"{invalid_short} invalid short-term insufficient rows, "
+            f"{invalid_combined} invalid combined candidates."
+        )
+
+    print("\nValidation passed:")
+    print(f"- {len(dual_scores)} stocks processed")
+    print(
+        "- "
+        f"{dual_scores['analyst_long_term_status'].isin([RANKED, PARTIAL_DATA]).sum()} "
+        "long-term ranked"
+    )
+    print(
+        "- "
+        f"{dual_scores['short_term_status'].isin([RANKED, PARTIAL_DATA]).sum()} "
+        "short-term ranked"
+    )
+    print("- 0 scores outside 0-100")
+    print("- 0 invalid combined candidates")
 
 
 def export_results(
@@ -2987,6 +3361,11 @@ def export_results(
     long_term_ranking: pd.DataFrame,
     short_term_ranking: pd.DataFrame,
     combined_candidates: pd.DataFrame,
+    strong_candidates: pd.DataFrame,
+    wait_for_entry: pd.DataFrame,
+    tactical_candidates: pd.DataFrame,
+    momentum_only: pd.DataFrame,
+    insufficient_data: pd.DataFrame,
 ) -> None:
 
     constituents.to_csv(
@@ -3038,6 +3417,12 @@ def export_results(
         index=False,
     )
 
+    insufficient_data.to_csv(
+        RUN_DIR
+        / "insufficient_data.csv",
+        index=False,
+    )
+
     excel_file = (
         RUN_DIR
         / "sp500_dual_score_analysis.xlsx"
@@ -3049,10 +3434,18 @@ def export_results(
     ) as writer:
 
         prepare_dataframe_for_excel(
+            combined_candidates
+        ).to_excel(
+            writer,
+            sheet_name="combined_candidates",
+            index=False,
+        )
+
+        prepare_dataframe_for_excel(
             long_term_ranking
         ).to_excel(
             writer,
-            sheet_name="Long Term Ranking",
+            sheet_name="long_term_ranking",
             index=False,
         )
 
@@ -3060,15 +3453,47 @@ def export_results(
             short_term_ranking
         ).to_excel(
             writer,
-            sheet_name="Short Term Entry",
+            sheet_name="short_term_ranking",
             index=False,
         )
 
         prepare_dataframe_for_excel(
-            combined_candidates
+            strong_candidates
         ).to_excel(
             writer,
-            sheet_name="Combined Candidates",
+            sheet_name="strong_candidates",
+            index=False,
+        )
+
+        prepare_dataframe_for_excel(
+            wait_for_entry
+        ).to_excel(
+            writer,
+            sheet_name="wait_for_entry",
+            index=False,
+        )
+
+        prepare_dataframe_for_excel(
+            tactical_candidates
+        ).to_excel(
+            writer,
+            sheet_name="tactical_candidates",
+            index=False,
+        )
+
+        prepare_dataframe_for_excel(
+            momentum_only
+        ).to_excel(
+            writer,
+            sheet_name="momentum_only",
+            index=False,
+        )
+
+        prepare_dataframe_for_excel(
+            insufficient_data
+        ).to_excel(
+            writer,
+            sheet_name="insufficient_data",
             index=False,
         )
 
@@ -3076,15 +3501,26 @@ def export_results(
             dual_scores
         ).to_excel(
             writer,
-            sheet_name="Full Analysis",
+            sheet_name="all_stocks",
+            index=False,
+        )
+
+        build_methodology_table().to_excel(
+            writer,
+            sheet_name="methodology",
             index=False,
         )
 
         prepare_dataframe_for_excel(
-            analyst_data
+            build_run_metadata(
+                constituents,
+                price_metrics,
+                analyst_data,
+                dual_scores,
+            )
         ).to_excel(
             writer,
-            sheet_name="Analyst Data",
+            sheet_name="run_metadata",
             index=False,
         )
 
@@ -3092,7 +3528,7 @@ def export_results(
             constituents
         ).to_excel(
             writer,
-            sheet_name="Constituents",
+            sheet_name="constituents",
             index=False,
         )
 
@@ -3133,6 +3569,11 @@ def main() -> None:
     print(
         "yfinance version:",
         yf.__version__,
+    )
+
+    print(
+        "Scoring model version:",
+        SCORING_MODEL_VERSION,
     )
 
     print(
@@ -3235,32 +3676,53 @@ def main() -> None:
         long_term_ranking,
         short_term_ranking,
         combined_candidates,
+        strong_candidates,
+        wait_for_entry,
+        tactical_candidates,
+        momentum_only,
+        insufficient_data,
     ) = create_rankings(
         dual_scores
     )
 
-    print(
-        "\n7/7 Sonuçlar kaydediliyor..."
+    validate_scores(
+        dual_scores,
+        combined_candidates,
     )
 
-    export_results(
-        constituents=constituents,
-        price_metrics=price_metrics,
-        complete_price_history=(
-            complete_price_history
-        ),
-        analyst_data=analyst_data,
-        dual_scores=dual_scores,
-        long_term_ranking=(
-            long_term_ranking
-        ),
-        short_term_ranking=(
-            short_term_ranking
-        ),
-        combined_candidates=(
-            combined_candidates
-        ),
-    )
+    if EXPORT_RESULTS:
+        print(
+            "\n7/7 Sonuçlar kaydediliyor..."
+        )
+
+        export_results(
+            constituents=constituents,
+            price_metrics=price_metrics,
+            complete_price_history=(
+                complete_price_history
+            ),
+            analyst_data=analyst_data,
+            dual_scores=dual_scores,
+            long_term_ranking=(
+                long_term_ranking
+            ),
+            short_term_ranking=(
+                short_term_ranking
+            ),
+            combined_candidates=(
+                combined_candidates
+            ),
+            strong_candidates=strong_candidates,
+            wait_for_entry=wait_for_entry,
+            tactical_candidates=tactical_candidates,
+            momentum_only=momentum_only,
+            insufficient_data=insufficient_data,
+        )
+
+    else:
+        print(
+            "\n7/7 Dosya çıktısı kapalı; sonuçlar terminale yazdırılıyor..."
+        )
 
     print_rankings(
         long_term_ranking,
