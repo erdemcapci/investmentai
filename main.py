@@ -26,6 +26,8 @@ from scoring import (
     assign_long_term_category,
     assign_short_term_category,
     calculate_coverage_confidence,
+    calculate_coverage_multiplier,
+    candidate_profile_priority,
     format_driver_text,
     score_absolute_volatility,
     score_analyst_sentiment,
@@ -2321,6 +2323,9 @@ def calculate_dual_scores(
     scores["analyst_coverage_confidence"] = rating_count.apply(
         calculate_coverage_confidence
     )
+    scores["analyst_coverage_multiplier"] = scores[
+        "analyst_coverage_confidence"
+    ].apply(calculate_coverage_multiplier)
 
     long_term_weights = {
         "upside": 0.35,
@@ -2389,14 +2394,14 @@ def calculate_dual_scores(
             avg_dollar_volume.lt(LOW_AVERAGE_DOLLAR_VOLUME),
             avg_dollar_volume.lt(20_000_000),
         ],
-        [8, 5, 3],
+        [5, 3, 1],
         default=0,
     )
     scores["long_term_risk_penalty"] += np.where(
         scores["volatility_annual_pct"].gt(
             HIGH_VOLATILITY_THRESHOLD_PCT
         ),
-        2,
+        1,
         0,
     )
     scores["long_term_risk_penalty"] += np.where(
@@ -2408,13 +2413,13 @@ def calculate_dual_scores(
         scores["target_dispersion_pct"].gt(
             HIGH_TARGET_DISPERSION_THRESHOLD_PCT
         ),
-        3,
+        2,
         0,
     )
 
     scores["analyst_long_term_score"] = (
         scores["analyst_long_term_raw_score"]
-        * scores["analyst_coverage_confidence"]
+        * scores["analyst_coverage_multiplier"]
         - scores["long_term_risk_penalty"]
     ).clip(lower=0, upper=100)
     scores.loc[
@@ -2444,14 +2449,20 @@ def calculate_dual_scores(
     scores["st_score_pullback_quality"] = scores[
         "drawdown_from_20d_high_pct"
     ].apply(score_pullback_quality)
-    scores["st_score_selloff_stability"] = scores.apply(
+    selloff_results = scores.apply(
         lambda row: score_selloff_stability(
             row.get("return_2d_pct"),
             row.get("negative_days_last_5"),
             row.get("worst_daily_return_5d_pct"),
         ),
         axis=1,
+        result_type="expand",
     )
+    scores["st_score_selloff_stability"] = selloff_results[0]
+    scores["selloff_stability_data_coverage_pct"] = (
+        selloff_results[1]
+    )
+    scores["selloff_stability_status"] = selloff_results[2]
     scores["st_score_volatility"] = np.where(
         scores["sector_volatility_percentile"].notna(),
         scores["sector_volatility_percentile"].apply(
@@ -2535,12 +2546,12 @@ def calculate_dual_scores(
     )
     scores["short_term_risk_penalty"] += np.where(
         scores["return_5d_pct"].le(-10),
-        5,
+        3,
         0,
     )
     scores["short_term_risk_penalty"] += np.where(
         scores["return_20d_pct"].ge(40),
-        5,
+        3,
         0,
     )
 
@@ -2578,6 +2589,9 @@ def calculate_dual_scores(
     )
     scores["candidate_profile"] = profiles[0]
     scores["candidate_profile_explanation"] = profiles[1]
+    scores["candidate_profile_priority"] = scores[
+        "candidate_profile"
+    ].apply(candidate_profile_priority)
 
     scores["combined_score"] = np.where(
         scores["analyst_long_term_score"].notna()
@@ -2728,11 +2742,12 @@ def create_rankings(
         combined_candidates
         .sort_values(
             [
+                "candidate_profile_priority",
                 "combined_score",
-                "analyst_long_term_score",
                 "short_term_entry_score",
+                "analyst_long_term_score",
             ],
-            ascending=[False, False, False],
+            ascending=[True, False, False, False],
         )
         .reset_index(drop=True)
     )
@@ -2807,6 +2822,7 @@ def print_rankings(
         "analyst_long_term_category",
         "analyst_long_term_status",
         "analyst_coverage_confidence",
+        "analyst_coverage_multiplier",
         "analyst_long_term_data_coverage_pct",
         "short_term_entry_score",
         "short_term_category",
@@ -2835,6 +2851,8 @@ def print_rankings(
         "return_20d_pct",
         "drawdown_from_20d_high_pct",
         "short_volatility_20d_pct",
+        "selloff_stability_data_coverage_pct",
+        "selloff_stability_status",
         "risk_flags",
     ]
 
@@ -2846,6 +2864,7 @@ def print_rankings(
         "analyst_long_term_score",
         "short_term_entry_score",
         "candidate_profile",
+        "candidate_profile_priority",
         "current_price",
         "selected_target_upside_pct",
         "positive_rating_pct",
@@ -2987,6 +3006,16 @@ def print_ticker_details(
     )
 
     print(
+        f"Analyst coverage multiplier: "
+        f"{display_value(row['analyst_coverage_multiplier'])}"
+    )
+
+    print(
+        f"Long-term risk penalty: "
+        f"{display_value(row['long_term_risk_penalty'])}"
+    )
+
+    print(
         f"Data coverage: long "
         f"{display_value(row['analyst_long_term_data_coverage_pct'], '%')}, "
         f"short {display_value(row['short_term_data_coverage_pct'], '%')}"
@@ -3045,6 +3074,7 @@ def print_ticker_details(
         "analyst_long_term_category",
         "analyst_long_term_status",
         "analyst_coverage_confidence",
+        "analyst_coverage_multiplier",
         "analyst_long_term_data_coverage_pct",
         "short_term_rank",
         "short_term_raw_score",
@@ -3054,6 +3084,7 @@ def print_ticker_details(
         "short_term_data_coverage_pct",
         "combined_score",
         "candidate_profile",
+        "candidate_profile_priority",
         "candidate_profile_explanation",
         "current_price",
         "current_price_source",
@@ -3106,6 +3137,8 @@ def print_ticker_details(
         "st_score_momentum",
         "st_score_ma_alignment",
         "st_score_selloff_stability",
+        "selloff_stability_data_coverage_pct",
+        "selloff_stability_status",
         "st_score_pullback_quality",
         "st_score_volatility",
         "st_score_earnings_timing",
@@ -3191,7 +3224,7 @@ def build_methodology_table() -> pd.DataFrame:
         ),
         (
             "analyst_long_term_score",
-            "Confidence-adjusted analyst-based score: target upside 35%, sentiment 30%, EPS revisions 20%, target agreement 10%, MA200 trend 5%.",
+            "Analyst-based score: raw score uses target upside 35%, sentiment 30%, EPS revisions 20%, target agreement 10%, MA200 trend 5%; final score applies analyst_coverage_multiplier and modest risk penalties.",
         ),
         (
             "short_term_entry_score",
@@ -3203,7 +3236,19 @@ def build_methodology_table() -> pd.DataFrame:
         ),
         (
             "confidence",
-            "Analyst coverage affects confidence, not raw attractiveness; fewer than 5 ratings is insufficient.",
+            "Analyst coverage confidence is softened through analyst_coverage_multiplier = 0.70 + 0.30 * analyst_coverage_confidence; fewer than 5 ratings is insufficient.",
+        ),
+        (
+            "risk_penalties",
+            "Long-term penalties: very low liquidity -5, low liquidity -3, liquidity warning -1, high volatility -1, extreme target upside -2, high target disagreement -2. Short-term penalties: very low liquidity -10, sharp recent selloff -3, extreme overextension -3.",
+        ),
+        (
+            "selloff_stability",
+            "Selloff stability uses return_2d_pct 45%, negative_days_last_5 30%, worst_daily_return_5d_pct 25%; missing subcomponents are excluded and subweights are dynamically normalized.",
+        ),
+        (
+            "candidate_profiles",
+            "ATTRACTIVE BUT TECHNICALLY WEAK means strong analyst-based attractiveness with severely weak technical setup; ATTRACTIVE, WAIT FOR ENTRY means strong analyst-based attractiveness but timing is not favorable yet.",
         ),
         (
             "categories",

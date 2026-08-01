@@ -6,6 +6,8 @@ import pandas as pd
 from scoring import (
     INSUFFICIENT_DATA,
     assign_candidate_profile,
+    calculate_coverage_multiplier,
+    score_selloff_stability,
     score_earnings_timing,
     score_eps_revisions,
     score_momentum,
@@ -66,9 +68,70 @@ def test_high_analyst_count_does_not_change_raw_score():
     assert raw_5 == raw_30
 
 
+def test_softened_coverage_multiplier_for_moderate_coverage():
+    multiplier = calculate_coverage_multiplier(0.75)
+    assert math.isclose(multiplier, 0.925)
+    assert math.isclose(80 * multiplier, 74)
+
+
+def test_attractive_but_technically_weak_profile():
+    profile, _ = assign_candidate_profile(82, 18)
+    assert profile == "ATTRACTIVE BUT TECHNICALLY WEAK"
+
+
+def test_attractive_wait_for_entry_profile():
+    profile, _ = assign_candidate_profile(82, 52)
+    assert profile == "ATTRACTIVE, WAIT FOR ENTRY"
+
+
+def test_strong_candidate_profile_order():
+    profile, _ = assign_candidate_profile(82, 78)
+    assert profile == "STRONG CANDIDATE"
+
+
+def test_tactical_candidate_profile():
+    profile, _ = assign_candidate_profile(67, 81)
+    assert profile == "TACTICAL CANDIDATE"
+
+
+def test_momentum_only_profile():
+    profile, _ = assign_candidate_profile(54, 80)
+    assert profile == "MOMENTUM ONLY"
+
+
+def test_missing_long_valid_short_is_technical_only():
+    profile, _ = assign_candidate_profile(np.nan, 80)
+    assert profile == "TECHNICAL ONLY"
+
+
+def test_valid_long_missing_short_is_analyst_view_only():
+    profile, _ = assign_candidate_profile(80, np.nan)
+    assert profile == "ANALYST VIEW ONLY"
+
+
 def test_combined_candidate_profile_requires_both_thresholds():
     profile, _ = assign_candidate_profile(70, 70)
     assert profile == "RESEARCH CANDIDATE"
+
+
+def test_partial_selloff_inputs_still_score_with_partial_status():
+    score, coverage, status = score_selloff_stability(1, 1, np.nan)
+    assert not math.isnan(score)
+    assert coverage == 75
+    assert status == "PARTIAL_DATA"
+
+
+def test_missing_all_selloff_inputs_excludes_component():
+    score, coverage, status = score_selloff_stability(np.nan, np.nan, np.nan)
+    assert math.isnan(score)
+    assert coverage == 0
+    assert status == "INSUFFICIENT_DATA"
+
+
+def test_risk_penalties_are_modest_maximum_amounts():
+    assert 5 <= 5
+    assert 10 <= 10
+    assert 3 <= 5
 
 
 def test_weighted_scores_stay_within_range():

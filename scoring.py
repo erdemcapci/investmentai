@@ -194,6 +194,14 @@ def calculate_coverage_confidence(rating_count: Any) -> float:
     ) / 100
 
 
+def calculate_coverage_multiplier(coverage_confidence: Any) -> float:
+    """Soften analyst coverage confidence so moderate coverage does not dominate."""
+    confidence = safe_float(coverage_confidence)
+    if pd.isna(confidence):
+        return np.nan
+    return float(np.clip(0.70 + 0.30 * confidence, 0, 1))
+
+
 def score_momentum(return_5d_pct: Any, return_20d_pct: Any) -> float:
     """Score momentum quality; healthy gains beat collapses and overextensions."""
     score_5d = piecewise_linear_score(
@@ -265,8 +273,8 @@ def score_selloff_stability(
     return_2d_pct: Any,
     negative_days_last_5: Any,
     worst_daily_return_5d_pct: Any,
-) -> float:
-    """Score recent instability without duplicating general momentum."""
+) -> tuple[float, float, str]:
+    """Score recent instability using available subcomponents only."""
     two_day = piecewise_linear_score(
         return_2d_pct,
         [(-10, 0), (-6, 25), (-3, 55), (-1, 80), (1, 100), (4, 85)],
@@ -279,11 +287,17 @@ def score_selloff_stability(
         worst_daily_return_5d_pct,
         [(-10, 0), (-6, 30), (-4, 55), (-2, 80), (-1, 100)],
     )
-    score, _ = weighted_score_available(
+    score, coverage = weighted_score_available(
         {"two_day": two_day, "red_days": red_days, "worst_day": worst_day},
         {"two_day": 0.45, "red_days": 0.30, "worst_day": 0.25},
     )
-    return score
+    if pd.isna(score):
+        status = INSUFFICIENT_DATA
+    elif coverage < 1:
+        status = PARTIAL_DATA
+    else:
+        status = RANKED
+    return score, coverage * 100, status
 
 
 def score_pullback_quality(drawdown_from_20d_high_pct: Any) -> float:
@@ -383,8 +397,10 @@ def assign_candidate_profile(long_term_score: Any, short_term_score: Any) -> tup
         return "ANALYST VIEW ONLY", "Analyst-based score is available, but entry timing data is insufficient."
     if lt >= 75 and st >= 75:
         return "STRONG CANDIDATE", "Strong analyst-based attractiveness and favorable entry timing."
+    if lt >= 75 and st < 40:
+        return "ATTRACTIVE BUT TECHNICALLY WEAK", "Strong analyst-based attractiveness, but the current technical setup is severely weak."
     if lt >= 75 and st < 60:
-        return "ATTRACTIVE, WAIT FOR ENTRY", "Long-term analyst view is strong, but entry timing is weak."
+        return "ATTRACTIVE, WAIT FOR ENTRY", "Strong analyst-based attractiveness, but short-term timing is not yet favorable."
     if lt >= 60 and st >= 75:
         return "TACTICAL CANDIDATE", "Good analyst-based score with especially favorable entry timing."
     if lt < 60 and st >= 75:
@@ -392,6 +408,15 @@ def assign_candidate_profile(long_term_score: Any, short_term_score: Any) -> tup
     if lt >= 60 and st >= 60:
         return "RESEARCH CANDIDATE", "Both scores clear the research threshold."
     return "LOW PRIORITY", "Both scores do not clear the research thresholds."
+
+
+def candidate_profile_priority(profile: Any) -> int:
+    """Return sorting priority for profiles eligible for combined candidates."""
+    return {
+        "STRONG CANDIDATE": 1,
+        "TACTICAL CANDIDATE": 2,
+        "RESEARCH CANDIDATE": 3,
+    }.get(str(profile), 99)
 
 
 def format_driver_text(
