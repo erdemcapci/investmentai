@@ -77,10 +77,10 @@ load_dotenv_file()
 # ============================================================
 
 # Ayrıntısını terminalde görmek istediğin ticker
-TICKER_TO_CHECK = "MU"
+TICKER_TO_CHECK = "VRTX"
 
 # Terminalde gösterilecek maksimum satır
-TOP_N = 50
+TOP_N = 100
 
 # Dosya çıktıları varsayılan olarak kapalı.
 # CSV/Excel üretmek için EXPORT_RESULTS=true kullan.
