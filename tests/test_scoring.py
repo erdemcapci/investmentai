@@ -39,10 +39,28 @@ def test_missing_critical_analyst_data_can_be_marked_insufficient():
     assert INSUFFICIENT_DATA == "INSUFFICIENT_DATA"
 
 
-def test_extreme_positive_momentum_scores_lower_than_healthy_momentum():
-    healthy = score_momentum(6, 15)
+def test_controlled_five_day_pullback_scores_above_five_day_increase():
+    pullback = score_momentum(-4, 15)
+    increase = score_momentum(6, 15)
+    assert pullback > increase
+
+
+def test_five_day_increase_does_not_outrank_flat_price_action():
+    flat = score_momentum(0, 15)
+    increase = score_momentum(6, 15)
+    assert flat > increase
+
+
+def test_sharp_five_day_drop_scores_lower_than_controlled_pullback():
+    controlled_pullback = score_momentum(-4, 15)
+    sharp_drop = score_momentum(-15, 15)
+    assert controlled_pullback > sharp_drop
+
+
+def test_extreme_positive_momentum_scores_lower_than_controlled_pullback():
+    controlled_pullback = score_momentum(-4, 15)
     overextended = score_momentum(25, 60)
-    assert healthy > overextended
+    assert controlled_pullback > overextended
 
 
 def test_analyst_backed_stabilizing_pullback_earns_bonus():
