@@ -25,6 +25,7 @@ from scoring import (
     assign_candidate_profile,
     assign_long_term_category,
     assign_short_term_category,
+    calculate_analyst_backed_pullback_bonus,
     calculate_coverage_confidence,
     calculate_coverage_multiplier,
     candidate_profile_priority,
@@ -2479,6 +2480,15 @@ def calculate_dual_scores(
         ),
         axis=1,
     )
+    scores["analyst_backed_pullback_bonus"] = scores.apply(
+        lambda row: calculate_analyst_backed_pullback_bonus(
+            row.get("selected_target_upside_pct"),
+            row.get("positive_rating_pct"),
+            row.get("return_5d_pct"),
+            row.get("return_1d_pct"),
+        ),
+        axis=1,
+    )
 
     short_term_weights = {
         "momentum": 0.25,
@@ -2557,6 +2567,7 @@ def calculate_dual_scores(
 
     scores["short_term_entry_score"] = (
         scores["short_term_raw_score"]
+        + scores["analyst_backed_pullback_bonus"]
         - scores["short_term_risk_penalty"]
     ).clip(lower=0, upper=100)
     scores.loc[
@@ -2832,6 +2843,7 @@ def print_rankings(
         "rating_count",
         "target_dispersion_pct",
         "return_5d_pct",
+        "analyst_backed_pullback_bonus",
         "risk_flags",
     ]
 
@@ -2847,6 +2859,7 @@ def print_rankings(
         "current_price",
         "return_1d_pct",
         "return_2d_pct",
+        "analyst_backed_pullback_bonus",
         "return_5d_pct",
         "return_20d_pct",
         "drawdown_from_20d_high_pct",
@@ -3082,6 +3095,7 @@ def print_ticker_details(
         "short_term_category",
         "short_term_status",
         "short_term_data_coverage_pct",
+        "analyst_backed_pullback_bonus",
         "combined_score",
         "candidate_profile",
         "candidate_profile_priority",

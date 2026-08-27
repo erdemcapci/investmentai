@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 
-SCORING_MODEL_VERSION = "2.0"
+SCORING_MODEL_VERSION = "2.1"
 
 RANKED = "RANKED"
 PARTIAL_DATA = "PARTIAL_DATA"
@@ -239,6 +239,39 @@ def score_momentum(return_5d_pct: Any, return_20d_pct: Any) -> float:
     return score
 
 
+def calculate_analyst_backed_pullback_bonus(
+    target_upside_pct: Any,
+    analyst_positive_pct: Any,
+    return_5d_pct: Any,
+    return_1d_pct: Any,
+) -> float:
+    """Reward a controlled weekly pullback supported by strong analyst conviction.
+
+    The bonus is intentionally all-or-nothing: a stock must have at least 25%
+    target upside, at least 80% buy/strong-buy ratings, a 3%-5% five-session
+    decline, and a stable latest session (within +/-1%). This prevents either
+    analyst optimism or a falling price by itself from improving entry timing.
+    """
+    values = [
+        safe_float(target_upside_pct),
+        safe_float(analyst_positive_pct),
+        safe_float(return_5d_pct),
+        safe_float(return_1d_pct),
+    ]
+    if any(pd.isna(value) for value in values):
+        return 0.0
+
+    upside, positive, five_day_return, one_day_return = values
+    if (
+        upside >= 25
+        and positive >= 80
+        and -5 <= five_day_return <= -3
+        and -1 <= one_day_return <= 1
+    ):
+        return 15.0
+    return 0.0
+
+
 def score_ma_distance(distance_pct: Any) -> float:
     """Score price distance from a moving average."""
     return piecewise_linear_score(
@@ -448,6 +481,9 @@ def format_driver_text(
             positive.append(f"Strong {label}")
         elif value <= 35:
             negative.append(f"Weak {label}")
+
+    if safe_float(row.get("analyst_backed_pullback_bonus")) > 0:
+        positive.append("Analyst-backed pullback has stabilized")
 
     flags = set(str(row.get("risk_flags", "")).split("|"))
     flag_negative = {

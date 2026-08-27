@@ -6,6 +6,7 @@ import pandas as pd
 from scoring import (
     INSUFFICIENT_DATA,
     assign_candidate_profile,
+    calculate_analyst_backed_pullback_bonus,
     calculate_coverage_multiplier,
     score_selloff_stability,
     score_earnings_timing,
@@ -42,6 +43,29 @@ def test_extreme_positive_momentum_scores_lower_than_healthy_momentum():
     healthy = score_momentum(6, 15)
     overextended = score_momentum(25, 60)
     assert healthy > overextended
+
+
+def test_analyst_backed_stabilizing_pullback_earns_bonus():
+    assert calculate_analyst_backed_pullback_bonus(40, 95, -4, 0.2) == 15
+
+
+def test_analyst_backed_pullback_requires_every_condition():
+    scenarios = [
+        (24.9, 95, -4, 0.2),
+        (40, 79.9, -4, 0.2),
+        (40, 95, -2.9, 0.2),
+        (40, 95, -4, 1.1),
+        (np.nan, 95, -4, 0.2),
+    ]
+    assert all(
+        calculate_analyst_backed_pullback_bonus(*scenario) == 0
+        for scenario in scenarios
+    )
+
+
+def test_analyst_backed_pullback_bonus_accepts_requested_boundaries():
+    assert calculate_analyst_backed_pullback_bonus(25, 80, -5, -1) == 15
+    assert calculate_analyst_backed_pullback_bonus(25, 80, -3, 1) == 15
 
 
 def test_controlled_pullback_scores_better_than_zero_drawdown():
