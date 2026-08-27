@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 
-SCORING_MODEL_VERSION = "2.1"
+SCORING_MODEL_VERSION = "2.2"
 
 RANKED = "RANKED"
 PARTIAL_DATA = "PARTIAL_DATA"
@@ -203,19 +203,27 @@ def calculate_coverage_multiplier(coverage_confidence: Any) -> float:
 
 
 def score_momentum(return_5d_pct: Any, return_20d_pct: Any) -> float:
-    """Score momentum quality; healthy gains beat collapses and overextensions."""
+    """Score entry timing, favoring a controlled five-session pullback.
+
+    The short-term ranking is intended to surface potential entries after a
+    recent dip, not stocks that have already rallied over the last five
+    sessions.  The 20-day return remains a lower-weight trend check so a
+    controlled weekly pullback within a healthy monthly trend can rank well.
+    """
     score_5d = piecewise_linear_score(
         return_5d_pct,
         [
             (-15, 0),
-            (-10, 10),
-            (-5, 35),
-            (0, 60),
-            (3, 85),
-            (6, 100),
-            (10, 80),
-            (15, 50),
-            (25, 20),
+            (-10, 20),
+            (-6, 80),
+            (-4, 100),
+            (-2, 90),
+            (0, 65),
+            (3, 40),
+            (6, 20),
+            (10, 5),
+            (15, 0),
+            (25, 0),
         ],
     )
     score_20d = piecewise_linear_score(
@@ -234,7 +242,7 @@ def score_momentum(return_5d_pct: Any, return_20d_pct: Any) -> float:
     )
     score, _ = weighted_score_available(
         {"score_5d": score_5d, "score_20d": score_20d},
-        {"score_5d": 0.65, "score_20d": 0.35},
+        {"score_5d": 0.80, "score_20d": 0.20},
     )
     return score
 
