@@ -70,9 +70,10 @@ def test_analyst_backed_stabilizing_pullback_earns_bonus():
 def test_analyst_backed_pullback_requires_every_condition():
     scenarios = [
         (24.9, 95, -4, 0.2),
-        (40, 79.9, -4, 0.2),
-        (40, 95, -2.9, 0.2),
-        (40, 95, -4, 1.1),
+        (40, 90, -4, 0.2),
+        (40, 95, -3.9, 0.2),
+        (40, 95, -7.1, 0.2),
+        (40, 95, -4, 0.51),
         (np.nan, 95, -4, 0.2),
     ]
     assert all(
@@ -82,8 +83,12 @@ def test_analyst_backed_pullback_requires_every_condition():
 
 
 def test_analyst_backed_pullback_bonus_accepts_requested_boundaries():
-    assert calculate_analyst_backed_pullback_bonus(25, 80, -5, -1) == 15
-    assert calculate_analyst_backed_pullback_bonus(25, 80, -3, 1) == 15
+    assert calculate_analyst_backed_pullback_bonus(25, 90.1, -7, -0.5) == 15
+    assert calculate_analyst_backed_pullback_bonus(25, 90.1, -4, 0.5) == 15
+
+
+def test_entire_requested_five_day_pullback_range_gets_peak_momentum_score():
+    assert score_momentum(-7, 15) == score_momentum(-4, 15)
 
 
 def test_controlled_pullback_scores_better_than_zero_drawdown():

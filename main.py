@@ -3242,7 +3242,7 @@ def build_methodology_table() -> pd.DataFrame:
         ),
         (
             "short_term_entry_score",
-            "Technical entry score: recent entry timing 25%, MA alignment 25%, pullback 20%, selloff stability 15%, volatility 10%, earnings timing 5%. Recent entry timing favors a controlled five-day decline over a five-day increase, with the 20-day return retained as a lower-weight trend check.",
+            "Technical entry score: recent entry timing 25%, MA alignment 25%, pullback 20%, selloff stability 15%, volatility 10%, earnings timing 5%. Recent entry timing favors a controlled 4%-7% five-day decline over a five-day increase, with the 20-day return retained as a lower-weight trend check. A 15-point fundamental bonus requires at least 25% target upside, more than 90% positive analyst ratings, and a latest-day return within +/-0.5%.",
         ),
         (
             "missing_data",
