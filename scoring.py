@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 
-SCORING_MODEL_VERSION = "2.2"
+SCORING_MODEL_VERSION = "2.3"
 
 RANKED = "RANKED"
 PARTIAL_DATA = "PARTIAL_DATA"
@@ -215,9 +215,9 @@ def score_momentum(return_5d_pct: Any, return_20d_pct: Any) -> float:
         [
             (-15, 0),
             (-10, 20),
-            (-6, 80),
+            (-7, 100),
             (-4, 100),
-            (-2, 90),
+            (-2, 80),
             (0, 65),
             (3, 40),
             (6, 20),
@@ -256,8 +256,8 @@ def calculate_analyst_backed_pullback_bonus(
     """Reward a controlled weekly pullback supported by strong analyst conviction.
 
     The bonus is intentionally all-or-nothing: a stock must have at least 25%
-    target upside, at least 80% buy/strong-buy ratings, a 3%-5% five-session
-    decline, and a stable latest session (within +/-1%). This prevents either
+    target upside, more than 90% buy/strong-buy ratings, a 4%-7% five-session
+    decline, and a stable latest session (within +/-0.5%). This prevents either
     analyst optimism or a falling price by itself from improving entry timing.
     """
     values = [
@@ -272,9 +272,9 @@ def calculate_analyst_backed_pullback_bonus(
     upside, positive, five_day_return, one_day_return = values
     if (
         upside >= 25
-        and positive >= 80
-        and -5 <= five_day_return <= -3
-        and -1 <= one_day_return <= 1
+        and positive > 90
+        and -7 <= five_day_return <= -4
+        and -0.5 <= one_day_return <= 0.5
     ):
         return 15.0
     return 0.0
