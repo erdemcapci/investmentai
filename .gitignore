@@ -5,3 +5,10 @@ __pycache__/
 sp500_fresh_runs/
 
 .DS_Store
+
+
+.ipynb_checkpoints/
+sp500_notebook_data/
+analysis-output/
+backups/
+.env
