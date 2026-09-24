@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 
 sp500_fresh_runs/
+investment_ai_fresh_runs/
 
 .DS_Store
 
