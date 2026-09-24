@@ -249,7 +249,10 @@ DISPLAY_COLUMNS = ['research_rank', 'symbol', 'company_name', 'status', 'positiv
 def scan_cache(base_dir, settings=None, as_of=None):
     base = Path(base_dir)
     cache = base / 'cache'
-    universe = pd.read_csv(cache / 'sp500_constituents.csv')
+    universe_path = cache / 'index_constituents.csv'
+    if not universe_path.exists():  # Backward compatibility with existing S&P-only caches.
+        universe_path = cache / 'sp500_constituents.csv'
+    universe = pd.read_csv(universe_path)
     rows = []
     for _, constituent in universe.iterrows():
         symbol = str(constituent['symbol'])
@@ -286,11 +289,18 @@ def save_results(ranked, output_dir, settings=None):
         columns = [c for c in DISPLAY_COLUMNS if c in frame]
         frame[columns + [c for c in frame if c not in columns]].to_csv(path, index=False)
         paths[name] = path
+    index_counts = {}
+    if 'index_name' in ranked:
+        for memberships in ranked['index_name'].fillna('').astype(str):
+            for membership in (name.strip() for name in memberships.split('|')):
+                if membership:
+                    index_counts[membership] = index_counts.get(membership, 0) + 1
     manifest = {
         'generated_at_utc': now_utc().isoformat(),
         'scan_as_of_utc': ranked['scan_as_of_utc'].iloc[0] if len(ranked) else None,
         'settings': asdict(settings or Settings()),
         'status_counts': {str(k): int(v) for k, v in ranked['status'].value_counts().items()},
+        'index_counts': index_counts,
         'methodology': 'Analyst conviction bands, then 60% conviction + 25% capped target upside + 15% bounded pullback score. Read README.md for gates.',
         'limitations': 'Research heuristic, not a return probability. No recovery date inferred. Retrieval age is not publication age. Historical analysis of current snapshots is not a backtest.',
     }
@@ -298,20 +308,22 @@ def save_results(ranked, output_dir, settings=None):
     return paths
 
 
-def refresh_cache(base_dir, settings=None, symbols=None):
+def refresh_cache(base_dir, settings=None, symbols=None, indexes=data.SUPPORTED_INDEXES):
     """Explicit, incremental network refresh; retain old data when a request fails."""
     s, base = settings or Settings(), Path(base_dir)
     cache = base / 'cache'
     for folder in ['price_history_2y', 'fundamentals', 'snapshots']:
         (cache / folder).mkdir(parents=True, exist_ok=True)
     data.yf.set_tz_cache_location(str(cache / 'yfinance_timezone_cache'))
-    constituent_path = cache / 'sp500_constituents.csv'
+    constituent_path = cache / 'index_constituents.csv'
     refresh_universe = not constituent_path.exists()
     if not refresh_universe:
         refresh_universe = (time.time() - constituent_path.stat().st_mtime) / 86400 > 7
     if refresh_universe:
-        data.fetch_sp500_constituents(constituent_path)
-    universe = pd.read_csv(constituent_path)
+        universe = data.fetch_index_constituents(cache, indexes)
+        universe.to_csv(constituent_path, index=False)
+    else:
+        universe = pd.read_csv(constituent_path)
     wanted = set(symbols) if symbols else set(universe['symbol'])
     unknown = wanted - set(universe['symbol'])
     if unknown:
@@ -375,10 +387,13 @@ def main():
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--refresh', action='store_true', help='Fetch stale/missing Yahoo data before analysis')
     parser.add_argument('--symbols', nargs='+', help='Limit network refresh to these symbols')
+    parser.add_argument('--indexes', nargs='+', choices=data.SUPPORTED_INDEXES,
+                        default=list(data.SUPPORTED_INDEXES),
+                        help='Indexes to refresh (default: S&P 500 and STOXX Europe 600)')
     args = parser.parse_args()
     settings = Settings()
     if args.refresh:
-        refresh_cache(args.data_dir, settings, args.symbols)
+        refresh_cache(args.data_dir, settings, args.symbols, args.indexes)
     ranked = scan_cache(args.data_dir, settings)
     paths = save_results(ranked, args.output_dir or args.data_dir / 'output', settings)
     print(ranked['status'].value_counts().to_string())
