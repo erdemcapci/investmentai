@@ -140,7 +140,7 @@ class ScannerTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             base = Path(folder)
             (base/'cache/fundamentals').mkdir(parents=True)
-            pd.DataFrame([{'symbol': 'TEST'}]).to_csv(base/'cache/sp500_constituents.csv', index=False)
+            pd.DataFrame([{'symbol': 'TEST', 'index_name': 'S&P 500'}]).to_csv(base/'cache/index_constituents.csv', index=False)
             path = base/'cache/fundamentals/TEST.pkl'
             pd.to_pickle({'symbol': 'TEST', 'fetched_at_utc': '2020-01-01', 'fetch_success': True}, path)
             before = path.read_bytes()
@@ -176,6 +176,31 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(frame.symbol.iloc[0], 'BRK-B')
             self.assertTrue(path.exists())
             self.assertEqual(get.call_args.args[0], data.SP500_URL)
+
+    def test_stoxx_download_maps_local_tickers_to_yahoo_symbols(self):
+        html = '''<table><tr><th>Company</th><th>Ticker</th><th>Country</th><th>Industry</th></tr>
+        <tr><td>SAP</td><td>SAP</td><td>Germany</td><td>Software</td></tr>
+        <tr><td>AstraZeneca</td><td>AZN</td><td>United Kingdom</td><td>Health Care</td></tr></table>'''
+        with TemporaryDirectory() as folder, patch.object(data.requests, 'get') as get:
+            get.return_value.text = html
+            path = Path(folder) / 'stoxx600_constituents.csv'
+            frame = data.fetch_stoxx600_constituents(path)
+            self.assertEqual(frame.symbol.tolist(), ['SAP.DE', 'AZN.L'])
+            self.assertTrue(frame.index_name.eq('STOXX Europe 600').all())
+            self.assertEqual(get.call_args.args[0], data.STOXX600_URL)
+
+    def test_combined_index_universe_deduplicates_and_preserves_memberships(self):
+        sp = pd.DataFrame([{'symbol': 'DUAL', 'index_name': 'S&P 500'}])
+        eu = pd.DataFrame([
+            {'symbol': 'DUAL', 'index_name': 'STOXX Europe 600'},
+            {'symbol': 'EU.DE', 'index_name': 'STOXX Europe 600'},
+        ])
+        with TemporaryDirectory() as folder, \
+                patch.object(data, 'fetch_sp500_constituents', return_value=sp), \
+                patch.object(data, 'fetch_stoxx600_constituents', return_value=eu):
+            combined = data.fetch_index_constituents(Path(folder))
+        self.assertEqual(combined.symbol.tolist(), ['DUAL', 'EU.DE'])
+        self.assertEqual(combined.iloc[0].index_name, 'S&P 500 | STOXX Europe 600')
 
     def test_offline_scan_makes_no_yahoo_requests(self):
         with TemporaryDirectory() as folder:

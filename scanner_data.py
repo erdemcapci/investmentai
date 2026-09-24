@@ -22,6 +22,19 @@ import yfinance as yf
 
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+STOXX600_URL = "https://en.wikipedia.org/wiki/STOXX_Europe_600"
+SUPPORTED_INDEXES = ("sp500", "stoxx600")
+
+# Yahoo's European symbols use the primary exchange suffix.  The public STOXX
+# table exposes country and local ticker rather than a vendor-specific symbol.
+YAHOO_SUFFIX_BY_COUNTRY = {
+    "austria": ".VI", "belgium": ".BR", "denmark": ".CO",
+    "finland": ".HE", "france": ".PA", "germany": ".DE",
+    "ireland": ".IR", "italy": ".MI", "netherlands": ".AS",
+    "norway": ".OL", "poland": ".WA", "portugal": ".LS",
+    "spain": ".MC", "sweden": ".ST", "switzerland": ".SW",
+    "united kingdom": ".L", "uk": ".L",
+}
 
 RATE_LIMIT_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
 
@@ -152,6 +165,7 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
 
         normalized["sp500_ticker"] = normalized["symbol"].astype(str).str.strip().str.upper()
         normalized["symbol"] = normalized["sp500_ticker"].map(normalize_symbol_for_yahoo)
+        normalized["index_name"] = "S&P 500"
         normalized["constituent_list_fetched_at_utc"] = utc_now_iso()
         normalized = normalized.drop_duplicates("symbol").reset_index(drop=True)
 
@@ -168,6 +182,87 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
         raise RuntimeError(
             "S&P 500 list could not be downloaded and no cached list exists."
         ) from exc
+
+
+def yahoo_symbol_for_europe(local_ticker: Any, country: Any) -> str:
+    """Translate the STOXX table's local ticker to Yahoo's exchange symbol."""
+    ticker = str(local_ticker).strip().upper().replace(" ", "-")
+    if not ticker or ticker == "NAN":
+        raise ValueError("Missing STOXX ticker")
+    suffix = YAHOO_SUFFIX_BY_COUNTRY.get(str(country).strip().lower())
+    if not suffix:
+        raise ValueError(f"Unsupported STOXX listing country: {country}")
+    # Preserve an already vendor-qualified ticker supplied by a future table.
+    if ticker.endswith(suffix):
+        return ticker
+    return ticker.replace(".", "-") + suffix
+
+
+def _find_stoxx_table(tables: list[pd.DataFrame]) -> pd.DataFrame:
+    for table in tables:
+        columns = {clean_column_name(c) for c in table.columns}
+        if ({"company", "ticker", "country"} <= columns or
+                {"company_name", "ticker", "country"} <= columns):
+            result = table.copy()
+            result.columns = [clean_column_name(c) for c in result.columns]
+            return result
+    raise ValueError("No STOXX Europe 600 constituent table was found")
+
+
+def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
+    """Fetch current STOXX Europe 600 members, falling back to its own cache."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; InvestmentAI/1.0)"}
+    try:
+        response = requests.get(STOXX600_URL, headers=headers, timeout=45)
+        response.raise_for_status()
+        raw = _find_stoxx_table(pd.read_html(StringIO(response.text)))
+        company_column = "company" if "company" in raw else "company_name"
+        industry_column = next((c for c in ("industry", "icb_sector", "sector") if c in raw), None)
+        rows = []
+        for _, item in raw.iterrows():
+            rows.append({
+                "symbol": yahoo_symbol_for_europe(item["ticker"], item["country"]),
+                "stoxx_ticker": str(item["ticker"]).strip().upper(),
+                "security": item[company_column],
+                "gics_sector": item[industry_column] if industry_column else pd.NA,
+                "country": item["country"],
+                "index_name": "STOXX Europe 600",
+                "constituent_list_fetched_at_utc": utc_now_iso(),
+            })
+        normalized = pd.DataFrame(rows).drop_duplicates("symbol").reset_index(drop=True)
+        normalized.to_csv(cache_path, index=False)
+        logging.info("Loaded %s STOXX Europe 600 listings.", len(normalized))
+        return normalized
+    except Exception as exc:
+        logging.warning("Could not refresh STOXX Europe 600 list: %s", exc)
+        if cache_path.exists():
+            return pd.read_csv(cache_path)
+        raise RuntimeError(
+            "STOXX Europe 600 list could not be downloaded and no cached list exists."
+        ) from exc
+
+
+def fetch_index_constituents(cache_dir: Path, indexes: Iterable[str] = SUPPORTED_INDEXES) -> pd.DataFrame:
+    """Fetch and combine requested indexes while retaining overlapping membership."""
+    requested = tuple(dict.fromkeys(str(name).lower() for name in indexes))
+    unknown = set(requested) - set(SUPPORTED_INDEXES)
+    if unknown:
+        raise ValueError(f"Unsupported indexes: {sorted(unknown)}")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    frames = []
+    if "sp500" in requested:
+        frames.append(fetch_sp500_constituents(cache_dir / "sp500_constituents.csv"))
+    if "stoxx600" in requested:
+        frames.append(fetch_stoxx600_constituents(cache_dir / "stoxx600_constituents.csv"))
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    # A rare dual listing stays one download target, with both memberships shown.
+    combined["index_name"] = combined["index_name"].fillna("")
+    memberships = combined.groupby("symbol")["index_name"].agg(
+        lambda values: " | ".join(dict.fromkeys(v for v in values if v))
+    )
+    combined = combined.drop_duplicates("symbol").set_index("symbol")
+    combined["index_name"] = memberships
+    return combined.reset_index()
 
 
 def looks_rate_limited(exc: Exception | str) -> bool:

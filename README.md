@@ -1,10 +1,10 @@
-# Investment AI — analyst conviction and pullbacks
+# Investment AI — S&P 500 + STOXX Europe 600 analyst scanner
 
-This scanner implements your preference for strong analyst agreement, substantial target-price upside, and a recent price decline that may offer a better entry. The notebook uses one ranking engine for every table and export. Run `investment_scanner.py` for this workflow; the existing `main.py` and `scoring.py` entry point uses its own scoring model. It is an explainable research screen, not a fitted AI prediction model.
+This scanner covers the **S&P 500 and STOXX Europe 600** and implements your preference for strong analyst agreement, substantial target-price upside, and a recent price decline that may offer a better entry. Index membership—not a revenue, market-cap, or analyst-coverage preselection—is the universe gate. The notebook uses one ranking engine for every table and export. Run `investment_scanner.py` for this workflow; the existing `main.py` and `scoring.py` entry point uses its own scoring model. It is an explainable research screen, not a fitted AI prediction model.
 
 ## Use it
 
-Install the repository dependencies with `python -m pip install -r requirements.txt`. For the notebook, install `requirements-notebook.txt` too. Open `Analyst_Pullback_Scanner.ipynb` with the repository root as its working directory and run all cells. By default this reads the `sp500_notebook_data` cache without contacting Yahoo. For a new checkout, first run `python investment_scanner.py --refresh` to populate that cache, or pass `--data-dir` to an existing notebook-format cache. The notebook shows the data status, analyst watchlist, pullback candidates, and companies needing review or more time. Change `Settings(...)` in the setup cell to experiment locally.
+Install the repository dependencies with `python -m pip install -r requirements.txt`. For the notebook, install `requirements-notebook.txt` too. Open `Analyst_Pullback_Scanner.ipynb` with the repository root as its working directory and run all cells. By default this reads the `sp500_notebook_data` cache without contacting Yahoo. For a new checkout, first run `python investment_scanner.py --refresh` to populate the combined-index cache, or pass `--data-dir` to an existing notebook-format cache. The notebook shows the data status, analyst watchlist, pullback candidates, and companies needing review or more time. Change `Settings(...)` in the setup cell to experiment locally.
 
 Set `REFRESH_DATA = True` to download stale or missing data, then run the notebook. Full-universe refreshes can take many minutes and depend on Yahoo availability. Set it back to `False` afterward. To update just a few symbols, set `REFRESH_SYMBOLS = ["AAPL", "MSFT"]`; ranking still covers the cached universe and flags other stale rows. Failures appear in `cache/refresh_errors.csv`. Failed core updates preserve the previous bundle with its original timestamp.
 
@@ -14,6 +14,8 @@ Command-line equivalents, from the original project folder:
 python investment_scanner.py
 python investment_scanner.py --refresh
 python investment_scanner.py --refresh --symbols AAPL MSFT
+python investment_scanner.py --refresh --indexes sp500
+python investment_scanner.py --refresh --indexes stoxx600
 python -m unittest discover -s tests -v
 ```
 
@@ -23,7 +25,13 @@ For a cache stored elsewhere:
 python investment_scanner.py --data-dir /path/to/sp500_notebook_data --output-dir analysis-output
 ```
 
-Python 3.12+ is recommended. The scanner loads locally created pickle caches; use only caches you trust. Price caches use `cache/price_history_2y/<symbol>.pkl`, analyst response bundles use `cache/fundamentals/<symbol>.pkl`, and the universe uses `cache/sp500_constituents.csv`. This format is separate from the original script's `sp500_fresh_runs` outputs. The notebook's `DATA_DIR` is configurable.
+Python 3.12+ is recommended. The scanner loads locally created pickle caches; use only caches you trust. Price caches use `cache/price_history_2y/<symbol>.pkl`, analyst response bundles use `cache/fundamentals/<symbol>.pkl`, and the merged universe uses `cache/index_constituents.csv`. Separate `sp500_constituents.csv` and `stoxx600_constituents.csv` files make source/fallback behavior auditable. Old S&P-only caches remain readable. This format is separate from the original script's `sp500_fresh_runs` outputs. The notebook's `DATA_DIR` is configurable.
+
+## Universe construction
+
+The default refresh requests both indexes. S&P membership is read from Wikipedia and its ticker notation is normalized for Yahoo (for example, `BRK.B` becomes `BRK-B`). STOXX membership is also read from its public Wikipedia component table; local European tickers are translated to Yahoo suffixes using the component country (`.L`, `.DE`, `.PA`, `.SW`, and so on). Each row carries `index_name`, and an overlapping Yahoo symbol is downloaded once while preserving both memberships.
+
+Each source has an independent CSV fallback. A source failure uses that source's last successful cache; it never silently substitutes the other index. A first run therefore needs both constituent sources to be reachable. Because index constituents and vendor ticker conventions change, inspect refresh errors and the two source caches after refreshes. Use `--indexes sp500` or `--indexes stoxx600` only when an intentionally single-index run is desired.
 
 ## Selection and ranking
 
@@ -81,7 +89,7 @@ The screen does not inspect company news, model transaction costs, determine pos
 
 An offline integration run processed 503 locally cached symbols on September 9, 2026. Every row was correctly marked `DATA_REFRESH_REQUIRED`. Cached market data and generated reports are not included in this repository. See `VALIDATION.md` for implementation verification.
 
-These default thresholds have not been optimized or backtested. The cache contains only one analyst snapshot per stock; using that snapshot to rank past dates would introduce look-ahead bias. Historical results using today's S&P membership would also have survivorship bias. The refresh function now preserves dated analyst response snapshots and previous bundles to support future point-in-time validation.
+These default thresholds have not been optimized or backtested. The cache contains only one analyst snapshot per stock; using that snapshot to rank past dates would introduce look-ahead bias. Historical results using today's S&P 500 or STOXX Europe 600 membership would also have survivorship bias. The refresh function now preserves dated analyst response snapshots and previous bundles to support future point-in-time validation.
 
 Before interpreting the screen as a profitable strategy, collect dated signals, measure subsequent 5/10/20-session returns and adverse excursions, compare against an appropriate market/sector benchmark, include trading costs and delisted constituents, and validate on unseen periods. This implementation makes no measured claim about recovery speed or strategy profitability.
 
