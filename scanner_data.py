@@ -220,8 +220,16 @@ def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
         industry_column = next((c for c in ("industry", "icb_sector", "sector") if c in raw), None)
         rows = []
         for _, item in raw.iterrows():
+            try:
+                symbol = yahoo_symbol_for_europe(item["ticker"], item["country"])
+            except ValueError as exc:
+                logging.warning(
+                    "Skipping unmappable STOXX constituent %r (%r): %s",
+                    item.get(company_column), item.get("ticker"), exc,
+                )
+                continue
             rows.append({
-                "symbol": yahoo_symbol_for_europe(item["ticker"], item["country"]),
+                "symbol": symbol,
                 "stoxx_ticker": str(item["ticker"]).strip().upper(),
                 "security": item[company_column],
                 "gics_sector": item[industry_column] if industry_column else pd.NA,
@@ -229,6 +237,8 @@ def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
                 "index_name": "STOXX Europe 600",
                 "constituent_list_fetched_at_utc": utc_now_iso(),
             })
+        if not rows:
+            raise ValueError("No mappable STOXX Europe 600 constituents were found")
         normalized = pd.DataFrame(rows).drop_duplicates("symbol").reset_index(drop=True)
         normalized.to_csv(cache_path, index=False)
         logging.info("Loaded %s STOXX Europe 600 listings.", len(normalized))
@@ -240,6 +250,57 @@ def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
         raise RuntimeError(
             "STOXX Europe 600 list could not be downloaded and no cached list exists."
         ) from exc
+
+
+def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
+    """Normalize and deduplicate constituent frames by their Yahoo symbol.
+
+    Memberships are combined in source order.  Metadata uses the first non-null
+    value, which avoids losing useful fields when an overlapping listing has a
+    sparse row in one of the source tables.
+    """
+    available = [frame.copy() for frame in frames if frame is not None and not frame.empty]
+    if not available:
+        raise ValueError("No index constituent rows were supplied")
+
+    combined = pd.concat(available, ignore_index=True, sort=False)
+    required = {"symbol", "index_name"}
+    missing = required - set(combined.columns)
+    if missing:
+        raise ValueError(f"Constituent data is missing required columns: {sorted(missing)}")
+
+    combined["symbol"] = combined["symbol"].astype(str).str.strip().str.upper()
+    combined = combined.loc[combined["symbol"].ne("") & combined["symbol"].ne("NAN")]
+    combined["index_name"] = combined["index_name"].fillna("").astype(str)
+
+    def first_present_value(values: pd.Series) -> Any:
+        present = values.loc[values.notna()]
+        return present.iloc[0] if not present.empty else pd.NA
+
+    metadata_columns = [
+        column for column in combined.columns
+        if column not in {"symbol", "index_name"}
+    ]
+    metadata = combined.groupby("symbol", sort=False)[metadata_columns].agg(
+        first_present_value
+    ) if metadata_columns else pd.DataFrame(index=combined["symbol"].drop_duplicates())
+    memberships = combined.groupby("symbol", sort=False)["index_name"].agg(
+        lambda values: " | ".join(dict.fromkeys(v for v in values if v))
+    )
+    result = metadata.join(memberships).reset_index()
+
+    # Expose canonical aliases used by main.py without removing the legacy
+    # names consumed by investment_scanner.py and existing caches.
+    alias_pairs = {
+        "security": "company_name",
+        "gics_sector": "sector",
+        "gics_sub_industry": "sub_industry",
+        "sp500_ticker": "source_symbol",
+    }
+    for source, destination in alias_pairs.items():
+        if destination not in result and source in result:
+            result[destination] = result[source]
+    return result
 
 
 def fetch_index_constituents(cache_dir: Path, indexes: Iterable[str] = SUPPORTED_INDEXES) -> pd.DataFrame:
@@ -254,15 +315,7 @@ def fetch_index_constituents(cache_dir: Path, indexes: Iterable[str] = SUPPORTED
         frames.append(fetch_sp500_constituents(cache_dir / "sp500_constituents.csv"))
     if "stoxx600" in requested:
         frames.append(fetch_stoxx600_constituents(cache_dir / "stoxx600_constituents.csv"))
-    combined = pd.concat(frames, ignore_index=True, sort=False)
-    # A rare dual listing stays one download target, with both memberships shown.
-    combined["index_name"] = combined["index_name"].fillna("")
-    memberships = combined.groupby("symbol")["index_name"].agg(
-        lambda values: " | ".join(dict.fromkeys(v for v in values if v))
-    )
-    combined = combined.drop_duplicates("symbol").set_index("symbol")
-    combined["index_name"] = memberships
-    return combined.reset_index()
+    return combine_index_constituents(frames)
 
 
 def looks_rate_limited(exc: Exception | str) -> bool:

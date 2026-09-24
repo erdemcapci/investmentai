@@ -5,13 +5,11 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
-import requests
 import yfinance as yf
 from tqdm.auto import tqdm
 
@@ -45,6 +43,7 @@ from scoring import (
     safe_float,
     weighted_score_available,
 )
+from scanner_data import combine_index_constituents, fetch_index_constituents
 
 
 def load_dotenv_file(
@@ -76,9 +75,6 @@ load_dotenv_file()
 # ============================================================
 # SETTINGS
 # ============================================================
-
-# Ayrıntısını terminalde görmek istediğin ticker
-TICKER_TO_CHECK = "VRTX"
 
 # Terminalde gösterilecek maksimum satır
 TOP_N = 100
@@ -130,14 +126,9 @@ VERY_LOW_AVERAGE_DOLLAR_VOLUME = float(
 RUN_STARTED_AT_UTC = pd.Timestamp.now(tz="UTC")
 RUN_ID = RUN_STARTED_AT_UTC.strftime("%Y%m%d_%H%M%S_UTC")
 
-OUTPUT_ROOT = Path("sp500_fresh_runs")
+OUTPUT_ROOT = Path("investment_ai_fresh_runs")
 RUN_DIR = OUTPUT_ROOT / RUN_ID
-
-RUN_DIR.mkdir(
-    parents=True,
-    exist_ok=False,
-)
-
+CONSTITUENT_CACHE_DIR = OUTPUT_ROOT / "constituent_cache"
 
 # ============================================================
 # GENERAL HELPERS
@@ -234,139 +225,26 @@ def linear_score(
 
 
 # ============================================================
-# S&P 500 CONSTITUENTS
+# COMBINED INDEX CONSTITUENTS
 # ============================================================
 
-def download_sp500_constituents() -> pd.DataFrame:
-
-    url = (
-        "https://raw.githubusercontent.com/datasets/"
-        "s-and-p-500-companies/main/data/constituents.csv"
+def download_combined_constituents() -> pd.DataFrame:
+    """Load both required indexes and adapt their shared schema for this model."""
+    constituents = combine_index_constituents(
+        [fetch_index_constituents(CONSTITUENT_CACHE_DIR)]
     )
-
-    response = requests.get(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        },
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    raw = pd.read_csv(
-        StringIO(response.text)
-    )
-
-    constituents = raw.rename(
-        columns={
-            "Symbol": "source_symbol",
-            "Security": "company_name",
-            "GICS Sector": "sector",
-            "GICS Sub-Industry": "sub_industry",
-            "Headquarters Location": "headquarters",
-            "Date added": "date_added",
-            "Founded": "founded",
-        }
-    ).copy()
-
-    # Yahoo BRK.B yerine BRK-B kullanır
-    constituents["symbol"] = (
-        constituents["source_symbol"]
-        .astype(str)
-        .str.strip()
-        .str.replace(
-            ".",
-            "-",
-            regex=False,
+    for column in ("company_name", "sector", "sub_industry"):
+        if column not in constituents:
+            constituents[column] = pd.NA
+    if constituents.empty or not constituents["index_name"].str.contains(
+        "S&P 500", regex=False, na=False
+    ).any() or not constituents["index_name"].str.contains(
+        "STOXX Europe 600", regex=False, na=False
+    ).any():
+        raise RuntimeError(
+            "The required combined S&P 500 + STOXX Europe 600 universe "
+            "could not be constructed. Both constituent sources are required."
         )
-    )
-
-    desired_columns = [
-        "symbol",
-        "source_symbol",
-        "company_name",
-        "sector",
-        "sub_industry",
-        "headquarters",
-        "date_added",
-        "CIK",
-        "founded",
-    ]
-
-    constituents = constituents[
-        [
-            column
-            for column in desired_columns
-            if column in constituents.columns
-        ]
-    ]
-
-    constituents = (
-        constituents
-        .drop_duplicates(
-            subset="symbol"
-        )
-        .reset_index(drop=True)
-    )
-
-    return constituents
-
-
-def download_sp500_constituents_from_wikipedia() -> pd.DataFrame:
-
-    url = (
-        "https://en.wikipedia.org/wiki/"
-        "List_of_S%26P_500_companies"
-    )
-
-    response = requests.get(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        },
-        timeout=60,
-    )
-
-    response.raise_for_status()
-
-    tables = pd.read_html(
-        StringIO(response.text)
-    )
-
-    raw = next(
-        table
-        for table in tables
-        if {
-            "Symbol",
-            "Security",
-        }.issubset(table.columns)
-    )
-
-    constituents = raw.rename(
-        columns={
-            "Symbol": "source_symbol",
-            "Security": "company_name",
-            "GICS Sector": "sector",
-            "GICS Sub-Industry": "sub_industry",
-            "Headquarters Location": "headquarters",
-            "Date added": "date_added",
-            "Founded": "founded",
-        }
-    ).copy()
-
-    # Yahoo BRK.B yerine BRK-B kullanır
-    constituents["symbol"] = (
-        constituents["source_symbol"]
-        .astype(str)
-        .str.strip()
-        .str.replace(
-            ".",
-            "-",
-            regex=False,
-        )
-    )
-
     return constituents
 
 
@@ -2828,6 +2706,7 @@ def print_rankings(
         "short_term_rank",
         "symbol",
         "company_name",
+        "index_name",
         "analyst_long_term_raw_score",
         "analyst_long_term_score",
         "analyst_long_term_category",
@@ -2852,6 +2731,7 @@ def print_rankings(
         "long_term_rank",
         "symbol",
         "company_name",
+        "index_name",
         "short_term_entry_score",
         "short_term_category",
         "analyst_long_term_score",
@@ -2873,6 +2753,7 @@ def print_rankings(
         "combined_rank",
         "symbol",
         "company_name",
+        "index_name",
         "combined_score",
         "analyst_long_term_score",
         "short_term_entry_score",
@@ -2936,252 +2817,6 @@ def print_rankings(
             .round(2)
             .to_string(index=False)
         )
-
-
-def print_ticker_details(
-    dual_scores: pd.DataFrame,
-    ticker_input: str,
-) -> None:
-
-    ticker = (
-        ticker_input
-        .strip()
-        .upper()
-        .replace(
-            ".",
-            "-",
-        )
-    )
-
-    result = dual_scores.loc[
-        dual_scores[
-            "symbol"
-        ].eq(ticker)
-    ].copy()
-
-    print("\n")
-    print("=" * 120)
-    print(
-        f"TICKER DETAYI: {ticker}"
-    )
-    print("=" * 120)
-
-    if result.empty:
-        print(
-            f"{ticker}, S&P 500 sonuçlarında bulunamadı."
-        )
-
-        return
-
-    row = result.iloc[0]
-
-    def display_value(
-        value: Any,
-        suffix: str = "",
-    ) -> str:
-
-        number = safe_float(value)
-        if pd.isna(number):
-            if pd.isna(value):
-                return "N/A"
-            return str(value)
-        return f"{number:,.2f}{suffix}"
-
-    print(
-        f"{row['symbol']} — "
-        f"{row['company_name']}"
-    )
-
-    print(
-        f"Analyst-based uzun vade: "
-        f"rank {row['long_term_rank']}"
-        f"/{len(dual_scores)}, "
-        f"raw {display_value(row['analyst_long_term_raw_score'])}, "
-        f"adjusted {display_value(row['analyst_long_term_score'])}, "
-        f"{row['analyst_long_term_category']}, "
-        f"{row['analyst_long_term_status']}"
-    )
-
-    print(
-        f"Kısa vade: "
-        f"rank {row['short_term_rank']}"
-        f"/{len(dual_scores)}, "
-        f"score "
-        f"raw {display_value(row['short_term_raw_score'])}, "
-        f"entry {display_value(row['short_term_entry_score'])}, "
-        f"{row['short_term_category']}, "
-        f"{row['short_term_status']}"
-    )
-
-    print(
-        f"Analyst coverage confidence: "
-        f"{display_value(row['analyst_coverage_confidence'])}"
-    )
-
-    print(
-        f"Analyst coverage multiplier: "
-        f"{display_value(row['analyst_coverage_multiplier'])}"
-    )
-
-    print(
-        f"Long-term risk penalty: "
-        f"{display_value(row['long_term_risk_penalty'])}"
-    )
-
-    print(
-        f"Data coverage: long "
-        f"{display_value(row['analyst_long_term_data_coverage_pct'], '%')}, "
-        f"short {display_value(row['short_term_data_coverage_pct'], '%')}"
-    )
-
-    print(
-        f"Combined: "
-        f"{display_value(row['combined_score'])}, "
-        f"{row['candidate_profile']}"
-    )
-
-    print(
-        f"Current price: "
-        f"{display_value(row['current_price'])}"
-    )
-
-    print(
-        f"Selected target: "
-        f"{display_value(row['selected_target_price'])}"
-    )
-
-    print(
-        f"Target upside: "
-        f"{display_value(row['selected_target_upside_pct'], '%')}"
-    )
-
-    print(
-        f"Positive ratings: "
-        f"{display_value(row['positive_rating_pct'], '%')} "
-        f"from "
-        f"{display_value(row['rating_count'])} ratings"
-    )
-
-    print(
-        f"Risk flags: "
-        f"{row['risk_flags'] or 'None'}"
-    )
-
-    print(
-        f"Positive drivers: "
-        f"{row['top_positive_drivers']}"
-    )
-
-    print(
-        f"Negative drivers: "
-        f"{row['top_negative_drivers']}"
-    )
-
-    detail_columns = [
-        "symbol",
-        "company_name",
-        "sector",
-        "long_term_rank",
-        "analyst_long_term_raw_score",
-        "analyst_long_term_score",
-        "analyst_long_term_category",
-        "analyst_long_term_status",
-        "analyst_coverage_confidence",
-        "analyst_coverage_multiplier",
-        "analyst_long_term_data_coverage_pct",
-        "short_term_rank",
-        "short_term_raw_score",
-        "short_term_entry_score",
-        "short_term_category",
-        "short_term_status",
-        "short_term_data_coverage_pct",
-        "analyst_backed_pullback_bonus",
-        "combined_score",
-        "candidate_profile",
-        "candidate_profile_priority",
-        "candidate_profile_explanation",
-        "current_price",
-        "current_price_source",
-        "price_as_of",
-        "target_low",
-        "target_mean",
-        "target_median",
-        "target_high",
-        "selected_target_price",
-        "selected_target_source",
-        "selected_target_upside_pct",
-        "strong_buy",
-        "buy",
-        "hold",
-        "sell",
-        "strong_sell",
-        "positive_rating_pct",
-        "negative_rating_pct",
-        "hold_rating_pct",
-        "recommendation_strength_score",
-        "rating_count",
-        "target_dispersion_pct",
-        "eps_up_7d",
-        "eps_down_7d",
-        "eps_up_30d",
-        "eps_down_30d",
-        "return_1d_pct",
-        "return_2d_pct",
-        "return_5d_pct",
-        "return_20d_pct",
-        "distance_from_ma20_pct",
-        "distance_from_ma50_pct",
-        "drawdown_from_20d_high_pct",
-        "short_volatility_20d_pct",
-        "negative_days_last_5",
-        "next_earnings_date",
-        "days_to_earnings",
-        "days_to_next_earnings",
-        "days_since_last_earnings",
-        "lt_score_upside",
-        "lt_score_sentiment",
-        "lt_score_coverage",
-        "lt_score_target_agreement",
-        "lt_score_eps_revisions",
-        "lt_score_long_trend",
-        "long_term_base_score",
-        "long_term_risk_penalty",
-        "short_term_raw_score",
-        "short_term_risk_penalty",
-        "st_score_momentum",
-        "st_score_ma_alignment",
-        "st_score_selloff_stability",
-        "selloff_stability_data_coverage_pct",
-        "selloff_stability_status",
-        "st_score_pullback_quality",
-        "st_score_volatility",
-        "st_score_earnings_timing",
-        "risk_flags",
-        "top_positive_drivers",
-        "top_negative_drivers",
-        "data_errors",
-        "data_fetched_at_utc",
-    ]
-
-    detail_columns = [
-        column
-        for column in detail_columns
-        if column in result.columns
-    ]
-
-    details = (
-        result[
-            detail_columns
-        ]
-        .T
-    )
-
-    details.columns = ["value"]
-
-    print("\n")
-    print(
-        details.to_string()
-    )
 
 
 # ============================================================
@@ -3290,7 +2925,9 @@ def build_run_metadata(
     metadata = {
         "run_timestamp_utc": RUN_STARTED_AT_UTC,
         "scoring_model_version": SCORING_MODEL_VERSION,
-        "sp500_constituents": len(constituents),
+        "combined_unique_constituents": len(constituents),
+        "sp500_constituents": int(constituents["index_name"].str.contains("S&P 500", regex=False, na=False).sum()),
+        "stoxx600_constituents": int(constituents["index_name"].str.contains("STOXX Europe 600", regex=False, na=False).sum()),
         "successful_price_rows": int(
             price_metrics["history_price"].notna().sum()
         ),
@@ -3321,7 +2958,7 @@ def build_run_metadata(
             .eq("INSUFFICIENT")
             .sum()
         ),
-        "data_sources": "GitHub datasets S&P 500 constituents; Yahoo Finance via yfinance.",
+        "data_sources": "Wikipedia S&P 500 and STOXX Europe 600 constituents; Yahoo Finance via yfinance.",
         "script_version": SCORING_MODEL_VERSION,
     }
 
@@ -3427,9 +3064,11 @@ def export_results(
     insufficient_data: pd.DataFrame,
 ) -> None:
 
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+
     constituents.to_csv(
         RUN_DIR
-        / "sp500_constituents.csv",
+        / "combined_index_constituents.csv",
         index=False,
     )
 
@@ -3484,7 +3123,7 @@ def export_results(
 
     excel_file = (
         RUN_DIR
-        / "sp500_dual_score_analysis.xlsx"
+        / "investment_ai_dual_score_analysis.xlsx"
     )
 
     with pd.ExcelWriter(
@@ -3612,7 +3251,7 @@ def export_results(
 def main() -> None:
 
     print("=" * 120)
-    print("S&P 500 DUAL-SCORE SCANNER")
+    print("INVESTMENT AI — S&P 500 + STOXX EUROPE 600 DUAL-SCORE SCANNER")
     print("=" * 120)
 
     print(
@@ -3636,22 +3275,21 @@ def main() -> None:
     )
 
     print(
-        "\n1/7 Güncel S&P 500 listesi indiriliyor..."
+        "\n1/7 S&P 500 + STOXX Europe 600 listeleri indiriliyor..."
     )
 
-    constituents = (
-        download_sp500_constituents()
-    )
+    constituents = download_combined_constituents()
 
     symbols = (
         constituents["symbol"]
         .tolist()
     )
 
-    print(
-        "Constituent count:",
-        len(constituents),
-    )
+    sp500_count = int(constituents["index_name"].str.contains("S&P 500", regex=False, na=False).sum())
+    stoxx_count = int(constituents["index_name"].str.contains("STOXX Europe 600", regex=False, na=False).sum())
+    print("S&P 500 constituents:", sp500_count)
+    print("STOXX Europe 600 constituents:", stoxx_count)
+    print("Unique combined Yahoo symbols:", len(constituents))
 
     print(
         "\n2/7 Güncel fiyat geçmişi indiriliyor..."
@@ -3744,6 +3382,19 @@ def main() -> None:
         dual_scores
     )
 
+    for index_name in ("S&P 500", "STOXX Europe 600"):
+        member = dual_scores["index_name"].str.contains(
+            index_name, regex=False, na=False
+        )
+        reached_ranking = (
+            dual_scores["analyst_long_term_status"].isin([RANKED, PARTIAL_DATA])
+            | dual_scores["short_term_status"].isin([RANKED, PARTIAL_DATA])
+        )
+        print(
+            f"{index_name} companies reaching a ranking: "
+            f"{int((member & reached_ranking).sum())}"
+        )
+
     validate_scores(
         dual_scores,
         combined_candidates,
@@ -3787,11 +3438,6 @@ def main() -> None:
         long_term_ranking,
         short_term_ranking,
         combined_candidates,
-    )
-
-    print_ticker_details(
-        dual_scores,
-        TICKER_TO_CHECK,
     )
 
     print("\n")

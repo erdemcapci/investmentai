@@ -1,23 +1,22 @@
 # Investment AI — S&P 500 + STOXX Europe 600 analyst scanner
 
-This scanner covers the **S&P 500 and STOXX Europe 600** and implements your preference for strong analyst agreement, substantial target-price upside, and a recent price decline that may offer a better entry. Index membership—not a revenue, market-cap, or analyst-coverage preselection—is the universe gate. The notebook uses one ranking engine for every table and export. Run `investment_scanner.py` for this workflow; the existing `main.py` and `scoring.py` entry point uses its own scoring model. It is an explainable research screen, not a fitted AI prediction model.
+The canonical application covers the **S&P 500 and STOXX Europe 600** in one combined universe. Index membership—not a revenue, market-cap, analyst-coverage, or Top-100 preselection—is the universe gate. Every constituent passes through the original `main.py` dual-score model, so US and European listings compete in the same long-term, short-term, and combined rankings.
 
 ## Use it
 
 Install the repository dependencies with `python -m pip install -r requirements.txt`. For the notebook, install `requirements-notebook.txt` too. Open `Analyst_Pullback_Scanner.ipynb` with the repository root as its working directory and run all cells. By default this reads the `sp500_notebook_data` cache without contacting Yahoo. For a new checkout, first run `python investment_scanner.py --refresh` to populate the combined-index cache, or pass `--data-dir` to an existing notebook-format cache. The notebook shows the data status, analyst watchlist, pullback candidates, and companies needing review or more time. Change `Settings(...)` in the setup cell to experiment locally.
 
-Set `REFRESH_DATA = True` to download stale or missing data, then run the notebook. Full-universe refreshes can take many minutes and depend on Yahoo availability. Set it back to `False` afterward. To update just a few symbols, set `REFRESH_SYMBOLS = ["AAPL", "MSFT"]`; ranking still covers the cached universe and flags other stale rows. Failures appear in `cache/refresh_errors.csv`. Failed core updates preserve the previous bundle with its original timestamp.
-
-Command-line equivalents, from the original project folder:
+For the canonical live dual-score analysis, run exactly:
 
 ```sh
-python investment_scanner.py
-python investment_scanner.py --refresh
-python investment_scanner.py --refresh --symbols AAPL MSFT
-python investment_scanner.py --refresh --indexes sp500
-python investment_scanner.py --refresh --indexes stoxx600
-python -m unittest discover -s tests -v
+python main.py
 ```
+
+`main.py` automatically loads both indexes, normalizes Yahoo symbols, deduplicates the union, and retains `index_name` in terminal tables and exports. `EXPORT_RESULTS=true python main.py` enables CSV and Excel output under `investment_ai_fresh_runs/`. The legacy `investment_scanner.py` cache workflow remains available for notebook compatibility, but is not a prerequisite for `main.py`.
+
+Set `REFRESH_DATA = True` to download stale or missing data, then run the notebook. Full-universe refreshes can take many minutes and depend on Yahoo availability. Set it back to `False` afterward. To update just a few symbols, set `REFRESH_SYMBOLS = ["AAPL", "MSFT"]`; ranking still covers the cached universe and flags other stale rows. Failures appear in `cache/refresh_errors.csv`. Failed core updates preserve the previous bundle with its original timestamp.
+
+The notebook and `investment_scanner.py` retain their legacy cache interface for compatibility; they are not part of the canonical live execution path.
 
 For a cache stored elsewhere:
 
