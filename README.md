@@ -1,101 +1,41 @@
-# Investment AI — S&P 500 + STOXX Europe 600 analyst scanner
+# Investment AI v3
 
-The canonical application covers the **S&P 500 and STOXX Europe 600** in one combined universe. Index membership—not a revenue, market-cap, analyst-coverage, or Top-100 preselection—is the universe gate. Every constituent passes through the original `main.py` dual-score model, so US and European listings compete in the same long-term, short-term, and combined rankings.
+A deterministic, point-in-time research scanner for the combined **S&P 500 and STOXX Europe 600** universe. It produces exactly two primary views: a long-term investment ranking and a short-term opportunity ranking. It does not trade, place orders, use an LLM for scoring, or claim guaranteed profitability.
 
-## Use it
+## Run
 
-Install the repository dependencies with `python -m pip install -r requirements.txt`. For the notebook, install `requirements-notebook.txt` too. Open `Analyst_Pullback_Scanner.ipynb` with the repository root as its working directory and run all cells. By default this reads the `sp500_notebook_data` cache without contacting Yahoo. For a new checkout, first run `python investment_scanner.py --refresh` to populate the combined-index cache, or pass `--data-dir` to an existing notebook-format cache. The notebook shows the data status, analyst watchlist, pullback candidates, and companies needing review or more time. Change `Settings(...)` in the setup cell to experiment locally.
-
-For the canonical live dual-score analysis, run exactly:
-
-```sh
+```bash
+pip install -r requirements.txt
 python main.py
 ```
 
-`main.py` automatically loads both indexes, normalizes Yahoo symbols, deduplicates the union, and retains `index_name` in terminal tables and exports. `EXPORT_RESULTS=true python main.py` enables CSV and Excel output under `investment_ai_fresh_runs/`. The legacy `investment_scanner.py` cache workflow remains available for notebook compatibility, but is not a prerequisite for `main.py`.
+Optional environment controls (the command remains the same program):
 
-Set `REFRESH_DATA = True` to download stale or missing data, then run the notebook. Full-universe refreshes can take many minutes and depend on Yahoo availability. Set it back to `False` afterward. To update just a few symbols, set `REFRESH_SYMBOLS = ["AAPL", "MSFT"]`; ranking still covers the cached universe and flags other stale rows. Failures appear in `cache/refresh_errors.csv`. Failed core updates preserve the previous bundle with its original timestamp.
-
-The notebook and `investment_scanner.py` retain their legacy cache interface for compatibility; they are not part of the canonical live execution path.
-
-For a cache stored elsewhere:
-
-```sh
-python investment_scanner.py --data-dir /path/to/sp500_notebook_data --output-dir analysis-output
+```bash
+EXPORT_RESULTS=true python main.py
+FORCE_REFRESH=true python main.py
 ```
 
-Python 3.12+ is recommended. The scanner loads locally created pickle caches; use only caches you trust. Price caches use `cache/price_history_2y/<symbol>.pkl`, analyst response bundles use `cache/fundamentals/<symbol>.pkl`, and the merged universe uses `cache/index_constituents.csv`. Separate `sp500_constituents.csv` and `stoxx600_constituents.csv` files make source/fallback behavior auditable. Old S&P-only caches remain readable. This format is separate from the original script's `sp500_fresh_runs` outputs. The notebook's `DATA_DIR` is configurable.
+`TOP_N` changes display length only; every deduplicated constituent is scored before ranking. Duplicate Yahoo symbols retain all index memberships.
 
-## Universe construction
+## What the scores mean
 
-The default refresh requests both indexes. S&P membership is read from Wikipedia and its ticker notation is normalized for Yahoo (for example, `BRK.B` becomes `BRK-B`). STOXX membership is also read from its public Wikipedia component table; local European tickers are translated to Yahoo suffixes using the component country (`.L`, `.DE`, `.PA`, `.SW`, and so on). Each row carries `index_name`, and an overlapping Yahoo symbol is downloaded once while preserving both memberships.
+**Long Term (1–3 year research horizon)** is 25% quality, 20% growth, 20% valuation, 20% changing expectations, 10% long-term relative strength/trend, and 5% financial safety. **Short Term (days to weeks)** is 20% relative strength, 25% classified setup quality, 20% expectations, 10% volume confirmation, 15% technical trend, and 10% event timing. Pullback and breakout/momentum engines are independent, and a security can have no credible setup.
 
-Each source has an independent CSV fallback. A source failure uses that source's last successful cache; it never silently substitutes the other index. A first run therefore needs both constituent sources to be reachable. Because index constituents and vendor ticker conventions change, inspect refresh errors and the two source caches after refreshes. Use `--indexes sp500` or `--indexes stoxx600` only when an intentionally single-index run is desired.
+Scores are bounded to 0–100 and available weights are renormalized only after minimum coverage is met. Missing data remains unknown (`NaN`), never zero. Sector peers are used when at least 15 exist; otherwise the combined universe is used. Financial firms exclude generic FCF, net-debt/EBITDA, and ROIC measures where they are not economically applicable.
 
-## Selection and ranking
+**Risk (0–100, higher is riskier)** separately describes observed price, balance-sheet, event, analyst-disagreement, and liquidity risk. **Confidence (0–100)** separately describes coverage, freshness, analyst breadth, and provider success. Neither modifies attractiveness.
 
-### 1. Analyst thesis comes first
+## Data and freshness
 
-A stock must have all five counts from Yahoo's **current** recommendation distribution, at least **10 rating opinions**, **70% Buy + Strong Buy**, and at most **10% Sell + Strong Sell**. Earnings-estimate analyst counts cannot substitute for rating coverage. Missing counts are unknown rather than zero. Yahoo opinions are treated as provider-reported counts, not verified independent votes.
+Yahoo Finance supplies batched, adjusted two-year daily OHLCV plus recommendation summaries, targets, EPS trends/revisions, earnings and revenue estimates, growth estimates, rating actions, earnings history/dates, quarterly valuation measures, and annual/quarterly financial statements. One `Ticker` instance is reused per symbol and concurrency defaults to four workers.
 
-Then require **15% target upside** and **$20 million average daily turnover**. Target = positive median, falling back to a positive mean. Upside = `(target / latest dated close - 1) × 100`. The low target is also shown; it is a downside scenario, not a guaranteed floor. Inconsistent target ranges are rejected.
+Prices refresh each run. Expectations cache for 18 hours, valuation for 24 hours, and fundamentals for seven days under `investment_ai_data/cache`. A failed refresh preserves the last successful cache. `FORCE_REFRESH=true` bypasses freshness checks.
 
-The analyst watchlist contains every stock passing these thesis gates and freshness checks, including ones waiting for timing or risk review. It does not assert that every watchlist stock is ready to buy.
+`investment_ai_data/history.sqlite` upserts one analyst snapshot per symbol per UTC date and stores every successful ranking run. Target and revenue momentum remain unavailable until genuine observations are old enough; history is never fabricated. Rank change uses positive numbers for movement upward (for example, +20 means 20 places better).
 
-Qualifying stocks sort by conviction bands: **90–100% positive**, **80–<90%**, then **70–<80%** at default settings. Within a band the score is:
+With `EXPORT_RESULTS=true`, one run directory contains `full_analysis.csv`, both ranking CSVs, `insufficient_data.csv`, metadata, and an Excel workbook with methodology and metadata sheets.
 
-- **60% analyst conviction:** `0.8 × positive-rating percentage + 0.2 × Strong-Buy percentage`.
-- **25% upside:** upside scaled from 0 to 50%, capped at 50% so extreme targets cannot dominate indefinitely.
-- **15% pullback:** a bounded preference for moderate volatility-relative declines. It peaks at 1.5 times the recent daily standard deviation scaled by the square root of the pullback window, and goes to zero at 0 or 3 times that amount.
+## Limitations
 
-The score is a preference index from 0 to 100, not a probability or expected percentage return. Sorting bands enforce analyst priority; within a band, upside and entry timing can outweigh small differences in analyst percentages. Nonqualifying rows remain visible after qualifying rows.
-
-### 2. Look for a recent, moderate decline
-
-The pullback screen accepts a **3–10% drop over five trading sessions**, or a **5–15% drop over ten sessions with the last five still negative**. It displays both returns and drawdown from the highest close over 20 sessions. Six closing observations are required for a five-session return.
-
-It also requires a positive latest daily return and a close at or above the five-session average. This is only an initial stabilization condition. It cannot establish that a bottom has formed.
-
-A decline beyond the percentage limits or above three volatility units is routed to review. Bigger drops do not automatically earn higher scores.
-
-### 3. Review risks before calling it a pullback candidate
-
-The separate pullback shortlist requires the analyst thesis, qualifying decline, stabilization, and no blocking review conditions:
-
-| Review condition | Default threshold |
-| --- | --- |
-| Target disagreement | `(high - low) / selected target` above 60%, or unknown range |
-| Damaged trend | More than 10% below the full 200-session average, or more than 20% down over 21 sessions |
-| Earnings deterioration | Current-quarter EPS estimate cut by more than 5% in 30 days |
-| Event risk | Earnings within seven calendar days, or no known future earnings date |
-| Missing timing context | Unknown volatility, full 200-session trend, or EPS revision data |
-
-EPS changes use the absolute prior EPS in the denominator: moving from a loss of 1 to a loss of 1.5 is deterioration of 50%. A zero baseline is unknown. These risk conditions can be adjusted in `Settings` where thresholds exist.
-
-The labels are `PULLBACK_CANDIDATE`, `WAIT_FOR_PULLBACK`, `WAIT_FOR_STABILIZATION`, `REVIEW_RISK`, `DOES_NOT_QUALIFY`, and `DATA_REFRESH_REQUIRED`. Each row states why it received that label. A pullback candidate is a research lead requiring review of the reason for the decline, not an automatic order.
-
-## Freshness and interpretation
-
-Price observations older than **four calendar days**, analyst bundles retrieved more than **seven days** ago, missing timestamps, and future timestamps fail the current shortlist. Four days allows ordinary weekends, but is not an exchange-calendar guarantee; inspect the displayed date, especially after market holidays. Analysis uses a single dated daily close for both target upside and price behavior. Today's Yahoo daily bar is excluded before 16:00 New York time. Early-close exchange holidays are not modeled; this policy may conservatively defer that day's bar until 16:00.
-
-Retrieving an analyst bundle today does **not** mean every underlying analyst report was updated today. Actual report publication dates and a reliable target deadline are not provided by these aggregate endpoints, so the scanner shows that limitation. Median targets and dispersion reduce some outlier influence; neither verifies the analysts' valuation assumptions.
-
-A 40% target gap is more potential upside than 20% under those target assumptions. It does **not** imply a faster climb, a reliable recovery, or a 40% short-term return. This is why target upside and entry conditions are separate. Analyst reports often address much longer periods than a one-week dip; the scanner does not invent a deadline or annualize the gap.
-
-The screen does not inspect company news, model transaction costs, determine position sizes, or place trades. Sector-wide valuation levels are not used as universal pass/fail rules. Fresh EPS deterioration, target disagreement, liquidity and trend are the limited extra checks chosen for this strategy.
-
-## Validation and next evidence to collect
-
-An offline integration run processed 503 locally cached symbols on September 9, 2026. Every row was correctly marked `DATA_REFRESH_REQUIRED`. Cached market data and generated reports are not included in this repository. See `VALIDATION.md` for implementation verification.
-
-These default thresholds have not been optimized or backtested. The cache contains only one analyst snapshot per stock; using that snapshot to rank past dates would introduce look-ahead bias. Historical results using today's S&P 500 or STOXX Europe 600 membership would also have survivorship bias. The refresh function now preserves dated analyst response snapshots and previous bundles to support future point-in-time validation.
-
-Before interpreting the screen as a profitable strategy, collect dated signals, measure subsequent 5/10/20-session returns and adverse excursions, compare against an appropriate market/sector benchmark, include trading costs and delisted constituents, and validate on unseen periods. This implementation makes no measured claim about recovery speed or strategy profitability.
-
-## Sources behind the design
-
-- [SEC: Analyzing Analyst Recommendations](https://www.sec.gov/about/reports-publications/investorpubsanalystshtm): analyst rating definitions, assumptions and conflicts require scrutiny; a recommendation alone is insufficient.
-- [Fidelity: S&P research methodology](https://research2.fidelity.com/fidelity/research/reports/SandP.asp): an example of analyst assessments using a 12-month performance horizon. This does not establish the horizon of every Yahoo target.
-- [Federal Reserve Bank of New York: Decomposing Short-Term Return Reversal](https://www.newyorkfed.org/medialibrary/media/research/staff_reports/sr513.pdf): research distinguishes components of short-term reversal and fundamental news. It supports examining the reason for a decline, not a blanket assumption that declines rebound.
-
-The numerical thresholds above are design choices for your preferences, not recommendations or results supplied by those sources.
+Yahoo fields and geographic coverage vary and may be delayed or absent. Currency-normalized benchmark strength is intentionally deferred; peer return percentiles avoid pretending mixed-currency absolute returns are a benchmark. Generic ROIC is omitted for financial companies. Historical revenue/target estimate momentum only becomes usable after locally collected point-in-time history exists. This is research decision support, not investment advice or a validated backtest; current analyst observations are never applied retroactively to historical prices.

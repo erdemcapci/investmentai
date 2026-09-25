@@ -13,3 +13,5 @@ sp500_notebook_data/
 analysis-output/
 backups/
 .env
+investment_ai_data/
+investment_ai_runs/
