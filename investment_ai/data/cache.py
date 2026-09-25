@@ -5,6 +5,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from investment_ai.status import ERROR, FRESH_CACHE, FRESH_PROVIDER, STALE_FALLBACK
+
+CURRENT_CACHE_SCHEMA_VERSION = 2
 
 
 class JsonCache:
@@ -51,14 +54,21 @@ class JsonCache:
         validator: Callable[[dict[str, Any]], bool] | None = None,
     ):
         old = self.read(tier, symbol)
-        if not force and self.fresh(old, ttl_hours):
-            return old, "cache"
+        old_valid = bool(
+            old
+            and old.get("cache_schema_version") == CURRENT_CACHE_SCHEMA_VERSION
+            and isinstance(old.get("data"), dict)
+            and (validator is None or validator(old.get("data", {})))
+        )
+        if not force and old_valid and self.fresh(old, ttl_hours):
+            return old, FRESH_CACHE
         try:
             data = fetch()
             valid = validator(data) if validator else bool(data)
             if not valid:
                 raise ValueError("provider response failed validation")
             item = {
+                "cache_schema_version": CURRENT_CACHE_SCHEMA_VERSION,
                 "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
                 "data": data,
             }
@@ -67,8 +77,8 @@ class JsonCache:
             ).with_suffix(".tmp")
             temporary.write_text(json.dumps(item, default=str))
             temporary.replace(path)
-            return item, "provider"
+            return item, FRESH_PROVIDER
         except Exception as exc:
-            if old:
-                return old, f"stale_cache_after_error:{exc}"
-            return {"fetched_at_utc": None, "data": {}, "error": str(exc)}, "error"
+            if old_valid:
+                return old, STALE_FALLBACK
+            return {"cache_schema_version": CURRENT_CACHE_SCHEMA_VERSION, "fetched_at_utc": None, "data": {}, "error": str(exc)}, ERROR

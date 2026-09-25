@@ -16,6 +16,9 @@ from investment_ai.config import (
     VALUATION_TTL_HOURS,
 )
 from investment_ai.data.cache import JsonCache
+from investment_ai.status import (
+    ERROR, FRESH_CACHE, FRESH_PROVIDER, PARTIAL, STALE_FALLBACK,
+)
 from investment_ai.features.analyst import (
     parse_actions,
     parse_eps_trend,
@@ -128,12 +131,13 @@ class YahooClient:
         for name, (endpoint, parser) in self.ANALYST_COMPONENTS.items():
             item, status = self._component(ticker, symbol, name, endpoint, parser)
             result.update(item.get("data", {}))
-            result[f"{name}_success"] = status in {"provider", "cache"}
+            result[f"{name}_success"] = status in {FRESH_PROVIDER, FRESH_CACHE}
             result[f"{name}_cache_status"] = status
+            result[f"{name}_fetched_at_utc"] = item.get("fetched_at_utc")
             component_statuses.append(status)
             if item.get("fetched_at_utc"):
                 fetched_times.append(item["fetched_at_utc"])
-            if "error" in status:
+            if status == ERROR:
                 errors.append(f"{name}:{status}")
         dates, date_status = self.cache.get_or_fetch(
             "analyst_earnings_dates",
@@ -144,7 +148,9 @@ class YahooClient:
             _meaningful,
         )
         result.update(dates.get("data", {}))
-        result["earnings_dates_success"] = date_status in {"provider", "cache"}
+        result["earnings_dates_success"] = date_status in {FRESH_PROVIDER, FRESH_CACHE}
+        result["earnings_dates_cache_status"] = date_status
+        result["earnings_dates_fetched_at_utc"] = dates.get("fetched_at_utc")
         component_statuses.append(date_status)
         if dates.get("fetched_at_utc"):
             fetched_times.append(dates["fetched_at_utc"])
@@ -168,15 +174,15 @@ class YahooClient:
         component_statuses.append(info_status)
         result["analyst_fetched_at_utc"] = max(fetched_times) if fetched_times else None
         result["analyst_cache_status"] = (
-            "STALE_FALLBACK"
-            if any(status.startswith("stale") for status in component_statuses)
+            STALE_FALLBACK
+            if any(status == STALE_FALLBACK for status in component_statuses)
             else (
-                "PARTIAL"
-                if any(status == "error" for status in component_statuses)
+                PARTIAL
+                if any(status == ERROR for status in component_statuses)
                 else (
-                    "FRESH"
-                    if any(status == "provider" for status in component_statuses)
-                    else "CACHE"
+                    FRESH_PROVIDER
+                    if any(status == FRESH_PROVIDER for status in component_statuses)
+                    else FRESH_CACHE
                 )
             )
         )
@@ -214,14 +220,14 @@ class YahooClient:
         errors.extend(
             status
             for status in (valuation_status, fundamental_status)
-            if "error" in status
+            if status == ERROR
         )
         result["analyst_component_error_count"] = sum(
-            "error" in status for status in component_statuses
+            status == ERROR for status in component_statuses
         )
         result["provider_success"] = np.mean(
             [
-                "error" not in status
+                status != ERROR
                 for status in component_statuses
                 + [valuation_status, fundamental_status]
             ]

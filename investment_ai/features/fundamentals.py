@@ -120,6 +120,12 @@ def derive_fundamentals(
         previous["operating_cash_flow"], previous["capital_expenditure"]
     )
     financial = is_financial(sector)
+    equity = number(current["equity"])
+    ebitda = number(current["ebitda"])
+    ebit = number(current["ebit"])
+    negative_equity = pd.notna(equity) and equity <= 0
+    negative_ebitda = pd.notna(ebitda) and ebitda <= 0
+    negative_operating_profit = pd.notna(ebit) and ebit <= 0
     invested_capital = current["total_debt"] + current["equity"] - current["cash"]
     tax_rate = ratio(current["tax_provision"], current["pretax_income"])
     tax_rate = np.clip(tax_rate, 0, 0.35) if pd.notna(tax_rate) else np.nan
@@ -173,14 +179,14 @@ def derive_fundamentals(
             else np.nan
         ),
         "net_debt": current["total_debt"] - current["cash"],
-        "debt_to_equity": ratio(current["total_debt"], current["equity"]),
+        "debt_to_equity": np.nan if negative_equity else ratio(current["total_debt"], equity),
         "net_debt_to_ebitda": (
             np.nan
-            if financial
-            else ratio(current["total_debt"] - current["cash"], current["ebitda"])
+            if financial or negative_ebitda or pd.isna(ebitda)
+            else ratio(current["total_debt"] - current["cash"], ebitda)
         ),
-        "interest_coverage": ratio(current["ebit"], abs(current["interest_expense"])),
-        "return_on_equity": ratio(current["net_income"], current["equity"]) * 100,
+        "interest_coverage": np.nan if negative_operating_profit else ratio(ebit, abs(current["interest_expense"])),
+        "return_on_equity": np.nan if negative_equity else ratio(current["net_income"], equity) * 100,
         "return_on_assets": ratio(current["net_income"], current["assets"]) * 100,
         "earnings_growth_yoy": change_pct(
             current["net_income"], previous["net_income"]
@@ -195,6 +201,16 @@ def derive_fundamentals(
             else current["ebit"] * (1 - tax_rate) / invested_capital * 100
         ),
         "is_financial": financial,
+        "negative_equity_flag": bool(negative_equity),
+        "negative_ebitda_flag": bool(negative_ebitda),
+        "negative_operating_profit_flag": bool(negative_operating_profit),
+        "financial_diagnostics": "|".join(
+            name for flag, name in (
+                (negative_equity, "NEGATIVE_EQUITY"),
+                (negative_ebitda, "NEGATIVE_EBITDA"),
+                (negative_operating_profit, "NEGATIVE_OPERATING_PROFIT"),
+            ) if flag
+        ),
     }
     result["revenue_cagr_3y"] = (
         ((revenues.iloc[0] / revenues.iloc[3]) ** (1 / 3) - 1) * 100

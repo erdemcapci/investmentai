@@ -18,6 +18,13 @@ def number(value: Any) -> float:
         return np.nan
 
 
+def safe_nanmean(values: Any) -> float:
+    """Mean of finite numeric values without NumPy's all-NaN warning."""
+    valid = [number(value) for value in values]
+    valid = [value for value in valid if pd.notna(value)]
+    return float(np.mean(valid)) if valid else np.nan
+
+
 def ratio(a: Any, b: Any) -> float:
     a, b = number(a), number(b)
     return np.nan if pd.isna(a) or pd.isna(b) or b == 0 else a / b

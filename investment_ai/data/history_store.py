@@ -32,6 +32,14 @@ SNAPSHOT_FIELDS = [
     "forward_revenue_growth",
 ]
 
+COMPONENT_FIELDS = {
+    "targets": {"target_low", "target_mean", "target_median", "target_high"},
+    "recommendations": {"strong_buy", "buy", "hold", "sell", "strong_sell", "positive_rating_pct", "rating_count"},
+    "eps_trend": {field for field in SNAPSHOT_FIELDS if field.startswith("eps_") and field.endswith("_current")},
+    "earnings_estimate": {"forward_eps_growth"},
+    "revenue_estimate": {field for field in SNAPSHOT_FIELDS if field.startswith("revenue_")} | {"forward_revenue_growth"},
+}
+
 
 class HistoryStore:
     def __init__(self, path: Path):
@@ -44,6 +52,9 @@ class HistoryStore:
         columns = ", ".join(f"{field} REAL" for field in SNAPSHOT_FIELDS)
         self.db.execute(
             f"CREATE TABLE IF NOT EXISTS analyst_snapshots(snapshot_date TEXT NOT NULL,fetched_at_utc TEXT NOT NULL,symbol TEXT NOT NULL,{columns},UNIQUE(fetched_at_utc,symbol))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS analyst_observations(symbol TEXT NOT NULL,component TEXT NOT NULL,observed_at_utc TEXT NOT NULL,snapshot_date TEXT NOT NULL,field TEXT NOT NULL,value REAL NOT NULL,UNIQUE(symbol,component,observed_at_utc,field))"
         )
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS ranking_history(run_id TEXT,run_timestamp TEXT,symbol TEXT,long_term_score REAL,long_term_rank INTEGER,short_term_score REAL,short_term_rank INTEGER,risk_score REAL,confidence_score REAL,short_term_setup TEXT,UNIQUE(run_id,symbol))"
@@ -64,6 +75,22 @@ class HistoryStore:
         self.db.commit()
         return bool(cursor.rowcount)
 
+    def upsert_component(self, symbol: str, component: str, data: dict[str, Any], when: datetime) -> bool:
+        """Write only fields owned by one freshly fetched analyst component."""
+        fields = COMPONENT_FIELDS.get(component, set())
+        rows = []
+        for field in fields:
+            value = pd.to_numeric(data.get(field), errors="coerce")
+            if pd.notna(value):
+                rows.append((symbol, component, when.isoformat(), when.date().isoformat(), field, float(value)))
+        before = self.db.total_changes
+        self.db.executemany(
+            "INSERT OR IGNORE INTO analyst_observations(symbol,component,observed_at_utc,snapshot_date,field,value) VALUES (?,?,?,?,?,?)",
+            rows,
+        )
+        self.db.commit()
+        return self.db.total_changes > before
+
     def historical_change(
         self,
         symbol: str,
@@ -77,9 +104,14 @@ class HistoryStore:
         as_of = as_of or datetime.now(timezone.utc)
         cutoff = (as_of.date() - timedelta(days=days)).isoformat()
         row = self.db.execute(
-            f"SELECT {field} FROM analyst_snapshots WHERE symbol=? AND snapshot_date<=? AND {field} IS NOT NULL ORDER BY snapshot_date DESC LIMIT 1",
-            (symbol, cutoff),
+            "SELECT value FROM analyst_observations WHERE symbol=? AND field=? AND snapshot_date<=? ORDER BY observed_at_utc DESC LIMIT 1",
+            (symbol, field, cutoff),
         ).fetchone()
+        if not row:  # backward-compatible access to pre-v3.1 history
+            row = self.db.execute(
+                f"SELECT {field} FROM analyst_snapshots WHERE symbol=? AND snapshot_date<=? AND {field} IS NOT NULL ORDER BY snapshot_date DESC LIMIT 1",
+                (symbol, cutoff),
+            ).fetchone()
         current = pd.to_numeric(current, errors="coerce")
         if not row or not row[0] or pd.isna(current):
             return np.nan, "HISTORY_NOT_YET_AVAILABLE"
@@ -112,13 +144,10 @@ class HistoryStore:
                     )
                 )
         for horizon in ("0y", "plus_1y"):
-            output[f"revenue_{horizon}_change_30d_pct"], _ = self.historical_change(
-                symbol,
-                f"revenue_{horizon}_avg",
-                30,
-                row.get(f"revenue_{horizon}_avg"),
-                as_of,
-            )
+            for days in (30, 90):
+                output[f"revenue_{horizon}_change_{days}d_pct"], _ = self.historical_change(
+                    symbol, f"revenue_{horizon}_avg", days,
+                    row.get(f"revenue_{horizon}_avg"), as_of)
         return output
 
     def save_rankings(

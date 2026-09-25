@@ -5,7 +5,7 @@ import re
 from typing import Any
 import numpy as np
 import pandas as pd
-from investment_ai.scoring.common import change_pct, curve, number, ratio, weighted
+from investment_ai.scoring.common import change_pct, curve, number, ratio, safe_nanmean, weighted
 
 PERIODS = ("0q", "+1q", "0y", "+1y")
 
@@ -154,9 +154,9 @@ def parse_estimates(value: Any, kind: str) -> dict[str, Any]:
             )
             * 100
         )
-    output[f"forward_{kind}_growth"] = output.get(
-        f"{kind}_plus_1y_growth", output.get(f"{kind}_0y_growth", np.nan)
-    )
+    plus_1y = number(output.get(f"{kind}_plus_1y_growth"))
+    current_year = number(output.get(f"{kind}_0y_growth"))
+    output[f"forward_{kind}_growth"] = plus_1y if pd.notna(plus_1y) else current_year
     return output
 
 
@@ -244,6 +244,9 @@ def parse_surprises(value: Any) -> dict[str, Any]:
         ),
         None,
     )
+    if not frame.empty:
+        dates = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        frame = frame.assign(_observation_date=np.asarray(dates)).sort_values("_observation_date")
     values = (
         pd.to_numeric(frame[column], errors="coerce").dropna().tail(4)
         if column
@@ -258,44 +261,46 @@ def parse_surprises(value: Any) -> dict[str, Any]:
         "median_eps_surprise_4q": values.median(),
         "mean_eps_surprise_4q": values.mean(),
         "eps_surprise_volatility_4q": values.std(ddof=0),
+        "earnings_surprise_observation_count": len(values),
     }
 
 
 def momentum_score(
-    row: dict[str, Any], prefix: str, weights: dict[str, float]
+    row: dict[str, Any], prefix: str, weights: dict[str, float],
+    window_weights: dict[int, float] | None = None,
 ) -> float:
+    window_weights = window_weights or {7: .25, 30: .25, 60: .25, 90: .25}
     components = {
-        period: np.nanmean(
-            [
-                curve(
-                    row.get(f"{prefix}_{period}_change_{days}d_pct"),
-                    [(-20, 0), (0, 50), (20, 100)],
-                )
-                for days in (7, 30, 60, 90)
-            ]
-        )
+        period: weighted(
+            {str(days): curve(row.get(f"{prefix}_{period}_change_{days}d_pct"),
+                              [(-20, 0), (0, 50), (20, 100)])
+             for days in window_weights},
+            {str(days): weight for days, weight in window_weights.items()}, 0
+        )[0]
         for period in weights
     }
     return weighted(components, weights, 0)[0]
 
 
 def expectations_score(row: dict[str, Any]) -> dict[str, Any]:
-    short_eps = momentum_score(row, "eps", {"0q": 0.55, "plus_1q": 0.45})
+    short_windows = {7: .50, 30: .30, 60: .15, 90: .05}
+    long_windows = {7: .30, 30: .30, 60: .20, 90: .20}
+    short_eps = momentum_score(row, "eps", {"0q": 0.55, "plus_1q": 0.45}, short_windows)
     long_eps = momentum_score(
-        row, "eps", {"0q": 0.15, "plus_1q": 0.20, "0y": 0.30, "plus_1y": 0.35}
+        row, "eps", {"0q": 0.15, "plus_1q": 0.20, "0y": 0.30, "plus_1y": 0.35}, long_windows
     )
-    breadth = curve(
-        np.nanmean(
-            [
-                row.get(f"eps_revision_breadth_{period}_{days}d", np.nan)
-                for period in ("0q", "plus_1q", "0y", "plus_1y")
-                for days in (7, 30)
-            ]
-        ),
+    long_breadth = curve(safe_nanmean([
+        row.get(f"eps_revision_breadth_{period}_{days}d", np.nan)
+        for period in ("0q", "plus_1q", "0y", "plus_1y") for days in (7, 30)]),
         [(-1, 0), (0, 50), (1, 100)],
     )
+    short_breadth = curve(weighted(
+        {f"{p}_{d}": row.get(f"eps_revision_breadth_{p}_{d}d")
+         for p in ("0q", "plus_1q") for d in (7, 30)},
+        {"0q_7": .35, "0q_30": .20, "plus_1q_7": .25, "plus_1q_30": .20}, 0)[0],
+        [(-1, 0), (0, 50), (1, 100)])
     recommendation = curve(
-        np.nanmean(
+        safe_nanmean(
             [
                 row.get("positive_rating_change_1m_pp", np.nan),
                 row.get("positive_rating_change_3m_pp", np.nan),
@@ -313,10 +318,18 @@ def expectations_score(row: dict[str, Any]) -> dict[str, Any]:
     consistency = curve(
         row.get("eps_surprise_volatility_4q"), [(0, 100), (10, 70), (30, 20), (60, 0)]
     )
-    components = {
+    period_keys = tuple(period.replace("+", "plus_") for period in PERIODS)
+    recent = weighted({"7": safe_nanmean([row.get(f"eps_{p}_change_7d_pct") for p in period_keys]),
+                       "30": safe_nanmean([row.get(f"eps_{p}_change_30d_pct") for p in period_keys])},
+                      {"7": .625, "30": .375}, 0)[0]
+    older = weighted({"60": safe_nanmean([row.get(f"eps_{p}_change_60d_pct") for p in period_keys]),
+                      "90": safe_nanmean([row.get(f"eps_{p}_change_90d_pct") for p in period_keys])},
+                     {"60": .5, "90": .5}, 0)[0]
+    acceleration = recent - older if pd.notna(recent) and pd.notna(older) else np.nan
+    long_components = {
         "eps_momentum": long_eps,
-        "revision_breadth": breadth,
-        "revenue_revision_momentum": row.get("revenue_revision_momentum_score"),
+        "revision_breadth": long_breadth,
+        "revenue_revision_momentum": row.get("revenue_revision_long_score"),
         "recommendation_trend": recommendation,
         "rating_actions": actions,
         "target_momentum": row.get("target_momentum_score"),
@@ -324,7 +337,7 @@ def expectations_score(row: dict[str, Any]) -> dict[str, Any]:
         "earnings_execution": execution,
         "expectation_consistency": consistency,
     }
-    weights = {
+    long_weights = {
         "eps_momentum": 0.25,
         "revision_breadth": 0.15,
         "revenue_revision_momentum": 0.15,
@@ -335,30 +348,57 @@ def expectations_score(row: dict[str, Any]) -> dict[str, Any]:
         "earnings_execution": 0.05,
         "expectation_consistency": 0.05,
     }
-    score, coverage, status = weighted(components, weights, 0.60)
+    short_components = {
+        "eps_momentum": short_eps, "revision_breadth": short_breadth,
+        "revenue_revision_momentum": row.get("revenue_revision_short_score"),
+        "recommendation_trend": curve(row.get("positive_rating_change_1m_pp"), [(-20,0),(0,50),(20,100)]),
+        "rating_actions": curve(row.get("rating_action_balance_7d"), [(-1,0),(0,50),(1,100)]),
+        "target_momentum": row.get("target_momentum_score"), "earnings_execution": execution,
+    }
+    short_weights = {"eps_momentum": .35, "revision_breadth": .20,
+                     "revenue_revision_momentum": .15, "recommendation_trend": .10,
+                     "rating_actions": .10, "target_momentum": .05, "earnings_execution": .05}
+    long_score, long_coverage, long_status = weighted(long_components, long_weights, .60)
+    short_score, short_coverage, short_status = weighted(short_components, short_weights, .60)
+    directional = {
+        "eps": curve(recent, [(-20,0),(0,50),(20,100)]),
+        "breadth": short_breadth,
+        "revenue": safe_nanmean([row.get("revenue_revision_short_score"), row.get("revenue_revision_long_score")]),
+        "recommendations": recommendation, "actions": actions,
+        "targets": row.get("target_momentum_score"),
+    }
+    direction_score, direction_coverage, _ = weighted(
+        directional, {"eps":.30,"breadth":.20,"revenue":.20,"recommendations":.10,"actions":.10,"targets":.10}, .50)
     trend = (
         "INSUFFICIENT_DATA"
-        if pd.isna(score)
+        if pd.isna(direction_score)
         else (
             "STRONGLY_IMPROVING"
-            if score >= 80
+            if direction_score >= 80
             else (
                 "IMPROVING"
-                if score >= 60
+                if direction_score >= 60
                 else (
                     "STABLE"
-                    if score >= 40
-                    else "DETERIORATING" if score >= 20 else "RAPIDLY_DETERIORATING"
+                    if direction_score >= 40
+                    else "DETERIORATING" if direction_score >= 20 else "RAPIDLY_DETERIORATING"
                 )
             )
         )
     )
     return {
-        **{f"expectations_{key}_score": value for key, value in components.items()},
         "eps_short_horizon_momentum_score": short_eps,
         "eps_long_horizon_momentum_score": long_eps,
-        "expectations_score": score,
-        "expectations_coverage": coverage,
-        "expectations_status": status,
-        "expectations_trend": trend,
+        "eps_revision_acceleration": acceleration,
+        "eps_revision_acceleration_score": curve(acceleration, [(-20,0),(0,50),(20,100)]),
+        "expectations_long_score": long_score, "expectations_long_coverage": long_coverage,
+        "expectations_long_status": long_status,
+        "expectations_short_score": short_score, "expectations_short_coverage": short_coverage,
+        "expectations_short_status": short_status,
+        "expectations_direction_score": direction_score,
+        "expectations_direction_coverage": direction_coverage,
+        "expectations_direction": trend,
+        # Compatibility alias; primary models never consume it.
+        "expectations_score": long_score, "expectations_coverage": long_coverage,
+        "expectations_status": long_status, "expectations_trend": trend,
     }
