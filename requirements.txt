@@ -4,7 +4,7 @@ pandas
 pytest
 requests
 scipy
-yfinance
+yfinance==1.7.0
 tqdm
 
 lxml
