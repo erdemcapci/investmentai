@@ -1,47 +1,234 @@
-"""Investment AI v3 entry point. Run only: ``python main.py``."""
+"""Investment AI v3.0.1 entry point. Run only: ``python main.py``."""
+
 from __future__ import annotations
-from datetime import datetime,timezone
+from datetime import datetime, timezone
 from pathlib import Path
 import uuid
+import numpy as np
 import pandas as pd
 import yfinance as yf
-from investment_ai.config import *
-from investment_ai.data.constituents import fetch_index_constituents
-from investment_ai.data.prices import download_prices,build_price_features
+from investment_ai.config import (
+    CACHE_DIR,
+    EXPORT_RESULTS,
+    HISTORY_DB,
+    PRICE_PERIOD,
+    SCORING_MODEL_VERSION,
+    TOP_N,
+)
 from investment_ai.data.cache import JsonCache
-from investment_ai.data.yahoo import YahooClient
+from investment_ai.data.constituents import fetch_index_constituents
 from investment_ai.data.history_store import HistoryStore
+from investment_ai.data.prices import build_price_features, download_prices
+from investment_ai.data.yahoo import YahooClient
 from investment_ai.pipeline import build_analysis
-from investment_ai.reporting.tables import print_rankings
 from investment_ai.reporting.export import export_run
+from investment_ai.reporting.tables import print_rankings
 
-def download_combined_constituents()->pd.DataFrame:
- frame=fetch_index_constituents(CACHE_DIR/'constituents')
- required={'S&P 500','STOXX Europe 600'}
- present=set('|'.join(frame.index_name.dropna()).split(' | '))
- if not required.issubset(present):raise RuntimeError('Both constituent sources are required for the combined universe')
- return frame
 
-def methodology()->pd.DataFrame:
- return pd.DataFrame([
-  {'score':'Long term','formula':'25% Quality + 20% Growth + 20% Valuation + 20% Expectations + 10% Long Trend + 5% Financial Safety'},
-  {'score':'Short term','formula':'20% Relative Strength + 25% Setup + 20% Expectations + 10% Volume + 15% Technical Trend + 10% Event Timing'},
-  {'score':'Risk','formula':'Separate observed-risk measure; never multiplied into attractiveness'},
-  {'score':'Confidence','formula':'Separate coverage/freshness/provider measure; never multiplied into attractiveness'},])
-def main()->None:
- started=datetime.now(timezone.utc);run_id=f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
- print('Loading combined S&P 500 + STOXX Europe 600 universe...');universe=download_combined_constituents();symbols=universe.symbol.tolist()
- print(f'Downloading two years of daily OHLCV for {len(symbols)} symbols in one batch...');prices=build_price_features(download_prices(symbols,PRICE_PERIOD),symbols)
- print('Loading cached/fresh Yahoo expectations, valuation, and fundamentals...');provider=YahooClient(JsonCache(CACHE_DIR)).fetch_many(universe)
- store=HistoryStore(HISTORY_DB)
- history_rows=[]
- for row in provider.to_dict('records'):
-  target_change,status=store.historical_change(row['symbol'],'target_median',30,row.get('target_median'));row['target_change_30d_pct']=target_change;row['target_history_status']=status;store.upsert_analyst(row['symbol'],row);history_rows.append(row)
- provider=pd.DataFrame(history_rows)
- full,long_term,short_term=build_analysis(universe,prices,provider);print_rankings(long_term,short_term,TOP_N)
- store.save_rankings(run_id,started.isoformat(),full[full.long_term_rank.notna()|full.short_term_rank.notna()].to_dict('records'));store.close()
- metadata={'run_id':run_id,'run_timestamp_utc':started.isoformat(),'scoring_model_version':SCORING_MODEL_VERSION,'yfinance_version':yf.__version__,'universe_count':len(universe),'sp500_count':universe.index_name.str.contains('S&P 500',regex=False).sum(),'stoxx600_count':universe.index_name.str.contains('STOXX Europe 600',regex=False).sum(),'price_coverage':prices.current_price.notna().mean(),'analyst_coverage':provider.rating_count.notna().mean() if 'rating_count' in provider else 0,'fundamental_coverage':provider.revenue.notna().mean() if 'revenue' in provider else 0,'valuation_coverage':provider.forward_pe.notna().mean() if 'forward_pe' in provider else 0,'ranked_long_term_count':len(long_term),'ranked_short_term_count':len(short_term),'provider_error_count':provider.data_errors.fillna('').astype(bool).sum(),'freshness_notes':'prices every run; expectations 18h; valuation 24h; statements 7d'}
- if EXPORT_RESULTS:
-  directory=Path('investment_ai_runs')/run_id;export_run(directory,full,long_term,short_term,metadata,methodology());print(f'Exported {directory}')
- print('\nResearch support only: no orders, guarantees, or automated buy/sell advice.')
-if __name__=='__main__':main()
+def download_combined_constituents() -> pd.DataFrame:
+    frame = fetch_index_constituents(CACHE_DIR / "constituents")
+    present = {
+        membership.strip()
+        for value in frame.index_name.dropna()
+        for membership in str(value).split("|")
+        if membership.strip()
+    }
+    if not {"S&P 500", "STOXX Europe 600"} <= present:
+        raise RuntimeError(
+            "Both constituent sources are required for the combined universe"
+        )
+    return frame
+
+
+def methodology() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "score": "Long term",
+                "formula": "25% Quality + 20% Growth + 20% Valuation + 20% Expectations + 10% Long Trend + 5% Financial Safety",
+            },
+            {
+                "score": "Short term",
+                "formula": "20% Relative Strength + 25% Setup + 20% Expectations + 10% Volume + 15% Technical Trend + 10% Event Timing",
+            },
+            {
+                "score": "Expectations",
+                "formula": "25% EPS momentum + 15% EPS breadth + 15% revenue momentum + 10% recommendations + 10% rating actions + 10% target momentum + 5% target signal + 5% execution + 5% consistency",
+            },
+            {
+                "score": "Risk",
+                "formula": "30% market + 25% applicable balance sheet + 15% event + 20% analyst disagreement + 10% liquidity",
+            },
+        ]
+    )
+
+
+def _rank_changes(
+    frame: pd.DataFrame, store: HistoryStore, started: datetime
+) -> pd.DataFrame:
+    result = frame.copy()
+    values = []
+    for row in result.to_dict("records"):
+        old = store.changes(row["symbol"], 7, started)
+        if not old:
+            values.append((np.nan, np.nan, np.nan, np.nan, "NEW"))
+            continue
+        values.append(
+            (
+                (
+                    row.get("long_term_score") - old["long_term_score"]
+                    if pd.notna(row.get("long_term_score"))
+                    and old["long_term_score"] is not None
+                    else np.nan
+                ),
+                (
+                    row.get("short_term_score") - old["short_term_score"]
+                    if pd.notna(row.get("short_term_score"))
+                    and old["short_term_score"] is not None
+                    else np.nan
+                ),
+                (
+                    old["long_term_rank"] - row.get("long_term_rank")
+                    if pd.notna(row.get("long_term_rank"))
+                    and old["long_term_rank"] is not None
+                    else np.nan
+                ),
+                (
+                    old["short_term_rank"] - row.get("short_term_rank")
+                    if pd.notna(row.get("short_term_rank"))
+                    and old["short_term_rank"] is not None
+                    else np.nan
+                ),
+                "AVAILABLE",
+            )
+        )
+    result[
+        [
+            "long_term_score_change_7d",
+            "short_term_score_change_7d",
+            "long_term_rank_change_7d",
+            "short_term_rank_change_7d",
+            "rank_history_status",
+        ]
+    ] = values
+    return result
+
+
+def main() -> None:
+    started = datetime.now(timezone.utc)
+    run_id = f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+    print("Loading combined S&P 500 + STOXX Europe 600 universe...")
+    universe = download_combined_constituents()
+    symbols = universe.symbol.tolist()
+    print(
+        f"Downloading two years of daily OHLCV for {len(symbols)} symbols in one batch..."
+    )
+    prices = build_price_features(download_prices(symbols, PRICE_PERIOD), symbols)
+    print("Loading cached/fresh Yahoo expectations, valuation, and fundamentals...")
+    provider = YahooClient(JsonCache(CACHE_DIR)).fetch_many(universe)
+    store = HistoryStore(HISTORY_DB)
+    history_rows = []
+    for row in provider.to_dict("records"):
+        row = store.add_analyst_history_features(row["symbol"], row, started)
+        # Stale/cache reuse is not a new observation. Provider timestamps are authoritative.
+        if any(
+            row.get(f"{name}_cache_status") == "provider"
+            for name in YahooClient.ANALYST_COMPONENTS
+        ):
+            fetched = datetime.fromisoformat(row["analyst_fetched_at_utc"])
+            store.upsert_analyst(row["symbol"], row, fetched)
+        history_rows.append(row)
+    provider = pd.DataFrame(history_rows)
+    full, _, _ = build_analysis(universe, prices, provider)
+    full = _rank_changes(full, store, started)
+    long_term = full[full.long_term_rank.notna()].sort_values("long_term_rank")
+    short_term = full[full.short_term_rank.notna()].sort_values("short_term_rank")
+    for label, column in (
+        ("Analyst", "expectations_score"),
+        ("Fundamental", "quality_score"),
+        ("Valuation", "valuation_score"),
+    ):
+        coverage = full[column].notna().mean() * 100
+        if coverage < 60:
+            print(
+                f"WARNING: {label} data coverage is only {coverage:.0f}%. Rankings are incomplete and should be treated cautiously."
+            )
+    print_rankings(long_term, short_term, TOP_N)
+    store.save_rankings(
+        run_id,
+        started.isoformat(),
+        full[full.long_term_rank.notna() | full.short_term_rank.notna()].to_dict(
+            "records"
+        ),
+    )
+    store.close()
+    metadata = {
+        "run_id": run_id,
+        "run_timestamp_utc": started.isoformat(),
+        "scoring_model_version": SCORING_MODEL_VERSION,
+        "yfinance_version": yf.__version__,
+        "universe_count": len(universe),
+        "sp500_count": universe.index_name.str.contains("S&P 500", regex=False).sum(),
+        "stoxx600_count": universe.index_name.str.contains(
+            "STOXX Europe 600", regex=False
+        ).sum(),
+        "price_coverage": prices.current_price.notna().mean(),
+        "ranked_long_term_count": len(long_term),
+        "ranked_short_term_count": len(short_term),
+    }
+    for tier, column in (
+        ("analyst", "analyst_cache_status"),
+        ("valuation", "valuation_cache_status"),
+        ("fundamental", "fundamental_cache_status"),
+    ):
+        statuses = provider.get(column, pd.Series("", index=provider.index)).astype(str)
+        metadata[f"{tier}_cache_hit_count"] = statuses.eq("cache").sum()
+        metadata[f"{tier}_fresh_fetch_count"] = (
+            statuses.eq("provider").sum()
+            if tier != "analyst"
+            else sum(
+                provider.get(
+                    f"{name}_cache_status", pd.Series("", index=provider.index)
+                )
+                .eq("provider")
+                .sum()
+                for name in YahooClient.ANALYST_COMPONENTS
+            )
+        )
+        metadata[f"{tier}_stale_fallback_count"] = statuses.str.contains(
+            "stale", case=False
+        ).sum()
+    metadata.update(
+        {
+            "analyst_component_error_count": provider.get(
+                "analyst_component_error_count", pd.Series(0, index=provider.index)
+            ).sum(),
+            "fundamental_error_count": provider.get(
+                "fundamental_cache_status", pd.Series("", index=provider.index)
+            )
+            .astype(str)
+            .str.contains("error")
+            .sum(),
+            "valuation_error_count": provider.get(
+                "valuation_cache_status", pd.Series("", index=provider.index)
+            )
+            .astype(str)
+            .str.contains("error")
+            .sum(),
+        }
+    )
+    for pillar in ("quality", "growth", "valuation", "expectations"):
+        metadata[f"{pillar}_score_coverage_pct"] = (
+            full[f"{pillar}_score"].notna().mean() * 100
+        )
+    if EXPORT_RESULTS:
+        directory = Path("investment_ai_runs") / run_id
+        export_run(directory, full, long_term, short_term, metadata, methodology())
+        print(f"Exported {directory}")
+    print(
+        "\nResearch support only: no orders, guarantees, or automated buy/sell advice."
+    )
+
+
+if __name__ == "__main__":
+    main()
