@@ -4,7 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from investment_ai.features.analyst import expectations_score
-from investment_ai.features.risk import risk_and_confidence
+from investment_ai.features.risk import market_price_risk_score, risk_and_confidence
+from investment_ai.status import ERROR, FRESH, FRESH_CACHE, FRESH_PROVIDER, INSUFFICIENT, PARTIAL, STALE, STALE_FALLBACK
 from investment_ai.features.technical import add_relative_strength
 from investment_ai.features.valuation import add_peer_percentiles
 from investment_ai.scoring.common import curve, weighted
@@ -41,7 +42,7 @@ def normalize_sector(value):
     return SECTOR_MAP.get(str(value).strip().lower(), str(value).strip())
 
 
-def _history_scores(row):
+def _history_scores_v31(row):
     target_changes = {}
     for days, weight in ((7, 0.45), (30, 0.35), (90, 0.20)):
         value = row.get(f"target_median_change_{days}d_pct")
@@ -52,63 +53,43 @@ def _history_scores(row):
             np.clip(value, -100, 100), [(-30, 0), (0, 50), (15, 80), (40, 100)]
         )
     target_score = weighted(target_changes, {"7": 0.45, "30": 0.35, "90": 0.20}, 0)[0]
-    revenue = {
-        "0y": curve(
-            row.get("revenue_0y_change_30d_pct"), [(-15, 0), (0, 50), (15, 100)]
-        ),
-        "plus_1y": curve(
-            row.get("revenue_plus_1y_change_30d_pct"), [(-15, 0), (0, 50), (15, 100)]
-        ),
-        "0q": curve(
-            row.get("revenue_0q_change_30d_pct"), [(-20, 0), (0, 50), (20, 100)]
-        ),
-        "plus_1q": curve(
-            row.get("revenue_plus_1q_change_30d_pct"), [(-20, 0), (0, 50), (20, 100)]
-        ),
-    }
-    revenue_score = weighted(
-        revenue, {"0y": 0.35, "plus_1y": 0.40, "0q": 0.10, "plus_1q": 0.15}, 0
-    )[0]
-    return target_score, revenue_score
+    def revenue_curve(period, days):
+        return curve(row.get(f"revenue_{period}_change_{days}d_pct"), [(-20,0),(0,50),(20,100)])
+    q0 = weighted({"7": revenue_curve("0q",7), "30": revenue_curve("0q",30)}, {"7":.60,"30":.40}, 0)[0]
+    q1 = weighted({"7": revenue_curve("plus_1q",7), "30": revenue_curve("plus_1q",30)}, {"7":.50,"30":.50}, 0)[0]
+    revenue_short = weighted({"0q":q0,"plus_1q":q1},{"0q":.55,"plus_1q":.45},0)[0]
+    y0 = weighted({"30":revenue_curve("0y",30),"90":revenue_curve("0y",90)}, {"30":.7,"90":.3},0)[0]
+    y1 = weighted({"30":revenue_curve("plus_1y",30),"90":revenue_curve("plus_1y",90)}, {"30":.7,"90":.3},0)[0]
+    revenue_long = weighted({"0y":y0,"plus_1y":y1},{"0y":.40,"plus_1y":.60},0)[0]
+    return target_score, revenue_short, revenue_long
+
+
+def _history_scores(row):
+    """Backward-compatible target/long-revenue pair."""
+    target, _, long_revenue = _history_scores_v31(row)
+    return target, long_revenue
 
 
 def _drivers(row):
+    specs = (("Business quality","Quality","quality_score",.25),("Growth","Growth","growth_score",.20),
+             ("Valuation vs peers","Valuation","valuation_score",.20),
+             ("Long expectations","Expectations","expectations_long_score",.20),
+             ("Long trend","Trend","long_trend_score",.10),("Financial safety","Safety","financial_safety_score",.05))
     candidates = []
-    for label, key, pillar in (
-        ("EPS estimates", "eps_0q_change_30d_pct", "Expectations"),
-        ("Revenue estimates", "revenue_0y_change_30d_pct", "Expectations"),
-        ("Target median", "target_median_change_30d_pct", "Expectations"),
-        ("Operating margin trend", "operating_margin_change_1y", "Quality"),
-    ):
-        value = row.get(key)
-        if pd.notna(value):
-            candidates.append(
-                (abs(value), value >= 0, f"{label} {value:+.1f}%", pillar)
-            )
-    if pd.notna(row.get("target_dispersion_pct")) and row["target_dispersion_pct"] > 30:
-        candidates.append(
-            (
-                row["target_dispersion_pct"],
-                False,
-                f"High target dispersion ({row['target_dispersion_pct']:.0f}%)",
-                "Risk",
-            )
-        )
-    if pd.notna(row.get("days_to_next_earnings")) and row["days_to_next_earnings"] <= 7:
-        candidates.append(
-            (50, False, f"Earnings in {row['days_to_next_earnings']:.0f} days", "Event")
-        )
-    positive = [
-        text for _, direction, text, _ in sorted(candidates, reverse=True) if direction
-    ][:3]
-    negative = [
-        text
-        for _, direction, text, _ in sorted(candidates, reverse=True)
-        if not direction
-    ][:3]
+    for name, pillar, key, weight in specs:
+        score = row.get(key)
+        if pd.notna(score):
+            contribution = weight * (score - 50)
+            candidates.append({"driver_name":name,"pillar":pillar,"raw_value":score,
+                               "component_score":score,"effective_weight":weight,
+                               "contribution_points":contribution,
+                               "direction":"POSITIVE" if contribution >= 0 else "NEGATIVE"})
+    positive = [f"+{d['contribution_points']:.1f} pts — {d['driver_name']}" for d in sorted(candidates,key=lambda x:x['contribution_points'],reverse=True) if d["contribution_points"]>0][:3]
+    negative = [f"{d['contribution_points']:.1f} pts — {d['driver_name']}" for d in sorted(candidates,key=lambda x:x['contribution_points']) if d["contribution_points"]<0][:3]
     return (
         "; ".join(positive) or "No dominant positive driver",
         "; ".join(negative) or "No dominant negative driver",
+        candidates,
     )
 
 
@@ -165,13 +146,19 @@ def build_analysis(
         (frame.target_high - frame.target_low) / selected.abs() * 100,
         np.nan,
     )
+    provider_price = pd.to_numeric(frame.get("current_price_provider", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    completed_price = pd.to_numeric(frame.get("current_price", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    frame["provider_price_vs_last_completed_close_pct"] = np.where(
+        provider_price.notna() & completed_price.gt(0),
+        (provider_price / completed_price - 1) * 100, np.nan)
     frame["fcf_yield"] = np.where(
         frame.market_cap.gt(0), frame.free_cash_flow / frame.market_cap, np.nan
     )
     history_scores = frame.apply(
-        lambda row: _history_scores(row), axis=1, result_type="expand"
+        lambda row: _history_scores_v31(row), axis=1, result_type="expand"
     )
-    frame[["target_momentum_score", "revenue_revision_momentum_score"]] = history_scores
+    frame[["target_momentum_score", "revenue_revision_short_score", "revenue_revision_long_score"]] = history_scores
+    frame["revenue_revision_momentum_score"] = frame["revenue_revision_long_score"]
     frame = add_peer_percentiles(
         frame,
         {
@@ -190,6 +177,7 @@ def build_analysis(
         ],
         axis=1,
     )
+    frame["market_price_risk_score"] = [market_price_risk_score(row) for row in frame.to_dict("records")]
     frame = pd.concat(
         [
             frame,
@@ -221,18 +209,18 @@ def build_analysis(
         short_term.set_index("symbol").short_term_rank
     )
     drivers = frame.apply(_drivers, axis=1, result_type="expand")
-    frame[["positive_drivers", "negative_drivers"]] = drivers
+    frame[["positive_drivers", "negative_drivers", "driver_contributions"]] = drivers
     frame["top_positive_driver"] = frame.positive_drivers.str.split(";").str[0]
     frame["top_negative_driver"] = frame.negative_drivers.str.split(";").str[0]
     frame["analyst_data_status"] = frame.get(
         "analyst_cache_status", pd.Series("INSUFFICIENT", index=frame.index)
-    ).replace({"cache": "FRESH", "provider": "FRESH"})
+    ).replace({FRESH_CACHE: FRESH, FRESH_PROVIDER: FRESH})
     frame["fundamental_data_status"] = frame.get(
         "fundamental_cache_status", pd.Series("INSUFFICIENT", index=frame.index)
-    ).replace({"cache": "FRESH", "provider": "FRESH"})
+    ).replace({FRESH_CACHE: FRESH, FRESH_PROVIDER: FRESH})
     frame["valuation_data_status"] = frame.get(
         "valuation_cache_status", pd.Series("INSUFFICIENT", index=frame.index)
-    ).replace({"cache": "FRESH", "provider": "FRESH"})
+    ).replace({FRESH_CACHE: FRESH, FRESH_PROVIDER: FRESH})
     frame["price_data_status"] = frame.get(
         "price_data_status", pd.Series("INSUFFICIENT", index=frame.index)
     ).fillna("INSUFFICIENT")
@@ -244,12 +232,12 @@ def build_analysis(
     ]
     frame["overall_data_status"] = frame[status_columns].apply(
         lambda values: (
-            "ERROR"
-            if values.astype(str).str.contains("error", case=False).any()
+            ERROR
+            if values.eq(ERROR).any()
             else (
-                "STALE_FALLBACK"
-                if values.astype(str).str.contains("stale", case=False).any()
-                else "PARTIAL" if not values.eq("FRESH").all() else "FRESH"
+                STALE_FALLBACK
+                if values.isin([STALE_FALLBACK, STALE]).any()
+                else PARTIAL if not values.eq(FRESH).all() else FRESH
             )
         ),
         axis=1,

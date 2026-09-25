@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted
+from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted, safe_nanmean
 
 
 def score_long_term(row: dict) -> dict:
@@ -50,7 +50,7 @@ def score_long_term(row: dict) -> dict:
                 row.get("cash_conversion"), [(0, 0), (0.8, 70), (1.5, 100), (3, 65)]
             ),
             "returns": curve(
-                np.nanmean(
+                safe_nanmean(
                     [row.get("return_on_equity", np.nan), row.get("roic", np.nan)]
                 ),
                 [(-10, 0), (0, 30), (15, 75), (30, 100)],
@@ -148,7 +148,7 @@ def score_long_term(row: dict) -> dict:
             "earnings": curve(
                 row.get("earnings_growth_yoy"), [(-50, 0), (0, 55), (30, 100)]
             ),
-            "price_risk": 100 - row.get("market_risk_score", np.nan),
+            "price_risk": 100 - row.get("market_price_risk_score", np.nan),
         }
         safety_weights = {"profitability": 0.40, "earnings": 0.30, "price_risk": 0.30}
     else:
@@ -169,7 +169,7 @@ def score_long_term(row: dict) -> dict:
         "quality": quality_score,
         "growth": growth_score,
         "valuation": valuation_score,
-        "expectations": row.get("expectations_score"),
+        "expectations": row.get("expectations_long_score"),
         "long_trend": long_trend,
         "financial_safety": safety_score,
     }

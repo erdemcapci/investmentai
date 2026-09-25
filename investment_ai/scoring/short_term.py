@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from investment_ai.features.technical import event_timing_score, setup_scores
-from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted
+from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted, safe_nanmean
 
 
 def score_short_term(row: dict) -> dict:
@@ -19,7 +19,7 @@ def score_short_term(row: dict) -> dict:
     volume = curve(
         row.get("relative_volume_1d"), [(0.3, 20), (1, 55), (1.8, 100), (4, 70)]
     )
-    technical = np.nanmean(
+    technical = safe_nanmean(
         [
             curve(
                 row.get("price_vs_ma20_pct"), [(-15, 0), (0, 60), (8, 100), (25, 40)]
@@ -35,7 +35,7 @@ def score_short_term(row: dict) -> dict:
     pillars = {
         "relative_strength": relative_strength,
         "setup": setup["setup_quality_score"],
-        "expectations": row.get("expectations_score"),
+        "expectations": row.get("expectations_short_score"),
         "volume": volume,
         "technical": technical,
         "event": event,
@@ -57,8 +57,8 @@ def score_short_term(row: dict) -> dict:
         and rs_coverage >= 0.60
         and pd.notna(setup["setup_quality_score"])
         and setup["setup_coverage"] >= 0.70
-        and pd.notna(row.get("expectations_score"))
-        and row.get("expectations_coverage", 0) >= 0.60
+        and pd.notna(row.get("expectations_short_score"))
+        and row.get("expectations_short_coverage", 0) >= 0.60
     )
     if not core_ok:
         score, status = np.nan, INSUFFICIENT_DATA

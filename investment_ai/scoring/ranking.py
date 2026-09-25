@@ -4,13 +4,17 @@ import pandas as pd
 
 def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     result = frame.copy()
+    if "expectations_long_score" not in result:
+        result["expectations_long_score"] = result.get("expectations_score")
+    if "expectations_short_score" not in result:
+        result["expectations_short_score"] = result.get("expectations_score")
     lt = (
         result[result.long_term_score.notna()]
         .sort_values(
             [
                 "long_term_score",
                 "confidence_score",
-                "expectations_score",
+                "expectations_long_score",
                 "quality_score",
             ],
             ascending=False,
@@ -25,7 +29,7 @@ def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
             [
                 "short_term_score",
                 "confidence_score",
-                "expectations_score",
+                "expectations_short_score",
                 "short_rs_score",
             ],
             ascending=False,

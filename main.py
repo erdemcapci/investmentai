@@ -1,4 +1,4 @@
-"""Investment AI v3.0.1 entry point. Run only: ``python main.py``."""
+"""Investment AI v3.1 entry point. Run only: ``python main.py``."""
 
 from __future__ import annotations
 from datetime import datetime, timezone
@@ -23,6 +23,7 @@ from investment_ai.data.yahoo import YahooClient
 from investment_ai.pipeline import build_analysis
 from investment_ai.reporting.export import export_run
 from investment_ai.reporting.tables import print_rankings
+from investment_ai.status import ERROR, FRESH_CACHE, FRESH_PROVIDER, STALE_FALLBACK
 
 
 def download_combined_constituents() -> pd.DataFrame:
@@ -45,16 +46,17 @@ def methodology() -> pd.DataFrame:
         [
             {
                 "score": "Long term",
-                "formula": "25% Quality + 20% Growth + 20% Valuation + 20% Expectations + 10% Long Trend + 5% Financial Safety",
+                "formula": "25% Quality + 20% Growth + 20% Valuation + 20% Long-Term Expectations + 10% Long Trend + 5% Financial Safety",
             },
             {
                 "score": "Short term",
-                "formula": "20% Relative Strength + 25% Setup + 20% Expectations + 10% Volume + 15% Technical Trend + 10% Event Timing",
+                "formula": "20% Relative Strength + 25% Setup + 20% Short-Term Expectations + 10% Volume + 15% Technical Trend + 10% Event Timing",
             },
             {
-                "score": "Expectations",
+                "score": "Long Expectations",
                 "formula": "25% EPS momentum + 15% EPS breadth + 15% revenue momentum + 10% recommendations + 10% rating actions + 10% target momentum + 5% target signal + 5% execution + 5% consistency",
             },
+            {"score":"Short Expectations", "formula":"35% short EPS momentum + 20% near-term breadth + 15% short revenue revisions + 10% recommendations + 10% rating actions + 5% target momentum + 5% execution"},
             {
                 "score": "Risk",
                 "formula": "30% market + 25% applicable balance sheet + 15% event + 20% analyst disagreement + 10% liquidity",
@@ -121,7 +123,7 @@ def main() -> None:
     universe = download_combined_constituents()
     symbols = universe.symbol.tolist()
     print(
-        f"Downloading two years of daily OHLCV for {len(symbols)} symbols in one batch..."
+        f"Downloading two years of daily OHLCV for {len(symbols)} symbols in resilient batches..."
     )
     prices = build_price_features(download_prices(symbols, PRICE_PERIOD), symbols)
     print("Loading cached/fresh Yahoo expectations, valuation, and fundamentals...")
@@ -130,21 +132,24 @@ def main() -> None:
     history_rows = []
     for row in provider.to_dict("records"):
         row = store.add_analyst_history_features(row["symbol"], row, started)
-        # Stale/cache reuse is not a new observation. Provider timestamps are authoritative.
-        if any(
-            row.get(f"{name}_cache_status") == "provider"
-            for name in YahooClient.ANALYST_COMPONENTS
-        ):
-            fetched = datetime.fromisoformat(row["analyst_fetched_at_utc"])
-            store.upsert_analyst(row["symbol"], row, fetched)
+        # One component, one authoritative timestamp: stale/cache data never advances history.
+        for name in YahooClient.ANALYST_COMPONENTS:
+            if row.get(f"{name}_cache_status") == FRESH_PROVIDER:
+                fetched_at = row.get(f"{name}_fetched_at_utc")
+                if fetched_at:
+                    store.upsert_component(row["symbol"], name, row, datetime.fromisoformat(fetched_at))
         history_rows.append(row)
     provider = pd.DataFrame(history_rows)
     full, _, _ = build_analysis(universe, prices, provider)
     full = _rank_changes(full, store, started)
+    if "expectations_long_score" not in full and "expectations_score" in full:
+        full["expectations_long_score"] = full["expectations_score"]
+    if "expectations_short_score" not in full and "expectations_score" in full:
+        full["expectations_short_score"] = full["expectations_score"]
     long_term = full[full.long_term_rank.notna()].sort_values("long_term_rank")
     short_term = full[full.short_term_rank.notna()].sort_values("short_term_rank")
     for label, column in (
-        ("Analyst", "expectations_score"),
+        ("Expectations", "expectations_long_score"),
         ("Fundamental", "quality_score"),
         ("Valuation", "valuation_score"),
     ):
@@ -153,6 +158,17 @@ def main() -> None:
             print(
                 f"WARNING: {label} data coverage is only {coverage:.0f}%. Rankings are incomplete and should be treated cautiously."
             )
+    price_coverage = prices.get("current_price", pd.Series(dtype=float)).notna().mean() * 100
+    warning = " STRONG WARNING" if price_coverage < 90 else " WARNING" if price_coverage < 95 else ""
+    print("\nRUN HEALTH")
+    print(f"Universe: {len(full):,}")
+    print(f"Price coverage: {price_coverage:.1f}%{warning}")
+    print(f"Analyst coverage: {full.expectations_long_score.notna().mean()*100:.1f}%")
+    print(f"Fundamental Quality coverage: {full.quality_score.notna().mean()*100:.1f}%")
+    print(f"Valuation coverage: {full.valuation_score.notna().mean()*100:.1f}%")
+    print(f"LT ranked: {len(long_term):,}\nST ranked: {len(short_term):,}")
+    print(f"Stale fallbacks: {provider.astype(str).apply(lambda c: c.eq(STALE_FALLBACK)).sum().sum():,}")
+    print(f"Provider errors: {provider.astype(str).apply(lambda c: c.eq(ERROR)).sum().sum():,}")
     print_rankings(long_term, short_term, TOP_N)
     store.save_rankings(
         run_id,
@@ -182,22 +198,20 @@ def main() -> None:
         ("fundamental", "fundamental_cache_status"),
     ):
         statuses = provider.get(column, pd.Series("", index=provider.index)).astype(str)
-        metadata[f"{tier}_cache_hit_count"] = statuses.eq("cache").sum()
+        metadata[f"{tier}_cache_hit_count"] = statuses.eq(FRESH_CACHE).sum()
         metadata[f"{tier}_fresh_fetch_count"] = (
-            statuses.eq("provider").sum()
+            statuses.eq(FRESH_PROVIDER).sum()
             if tier != "analyst"
             else sum(
                 provider.get(
                     f"{name}_cache_status", pd.Series("", index=provider.index)
                 )
-                .eq("provider")
+                .eq(FRESH_PROVIDER)
                 .sum()
                 for name in YahooClient.ANALYST_COMPONENTS
             )
         )
-        metadata[f"{tier}_stale_fallback_count"] = statuses.str.contains(
-            "stale", case=False
-        ).sum()
+        metadata[f"{tier}_stale_fallback_count"] = statuses.eq(STALE_FALLBACK).sum()
     metadata.update(
         {
             "analyst_component_error_count": provider.get(

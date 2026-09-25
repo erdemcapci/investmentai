@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-SCORING_MODEL_VERSION = "3.0.1"
+SCORING_MODEL_VERSION = "3.1"
 TOP_N = int(os.getenv("TOP_N", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
 FORCE_REFRESH = os.getenv("FORCE_REFRESH", "false").lower() in {"1", "true", "yes", "y"}
@@ -20,3 +20,6 @@ ANALYST_TTL_HOURS = 18
 VALUATION_TTL_HOURS = 24
 FUNDAMENTALS_TTL_HOURS = 24 * 7
 PRICE_PERIOD = "2y"
+MIN_PEERS = 15
+PRICE_BATCH_SIZE = 150
+PRICE_DOWNLOAD_ATTEMPTS = 3

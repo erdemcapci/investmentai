@@ -1,8 +1,9 @@
 from __future__ import annotations
 from typing import Any
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-from investment_ai.scoring.common import curve, weighted, percentile
+from investment_ai.scoring.common import curve, weighted, percentile, safe_nanmean
 
 
 def _ret(s: pd.Series, n: int) -> float:
@@ -13,7 +14,7 @@ def _ret(s: pd.Series, n: int) -> float:
     )
 
 
-def price_features(history: pd.DataFrame) -> dict[str, Any]:
+def price_features(history: pd.DataFrame, now: datetime | None = None) -> dict[str, Any]:
     if history is None or history.empty:
         return {}
     h = history.copy()
@@ -23,6 +24,11 @@ def price_features(history: pd.DataFrame) -> dict[str, Any]:
     h.index = pd.to_datetime(h.index, utc=True, errors="coerce")
     h = h.loc[~h.index.isna()].sort_index()
     h = h.loc[~h.index.duplicated(keep="last")]
+    now = now or datetime.now(timezone.utc)
+    today = pd.Timestamp(now).tz_convert("UTC").date()
+    # Daily Yahoo bars stamped today may still be forming; technicals use closes only.
+    if len(h) and h.index[-1].date() == today:
+        h = h.iloc[:-1]
     close = pd.to_numeric(h["Close"], errors="coerce")
     close = close.where(close > 0).dropna()
     if close.empty:
@@ -32,10 +38,14 @@ def price_features(history: pd.DataFrame) -> dict[str, Any]:
         h.get("Volume", pd.Series(index=h.index, dtype=float)), errors="coerce"
     ).where(lambda values: values >= 0)
     daily = close.pct_change(fill_method=None)
+    age = max((today - close.index[-1].date()).days, 0)
+    status = "FRESH" if age <= 4 else "STALE" if age <= 7 else "INSUFFICIENT"
     out = {
         "current_price": close.iloc[-1],
         "price_as_of": close.index[-1].isoformat(),
-        "price_data_status": "FRESH",
+        "technical_price_as_of": close.index[-1].isoformat(),
+        "price_age_calendar_days": age,
+        "price_data_status": status,
     }
     for n in (1, 2, 5, 20, 60, 126, 252):
         out[f"return_{n}d_pct"] = _ret(close, n)
@@ -77,10 +87,20 @@ def add_relative_strength(frame: pd.DataFrame, minimum_peers: int = 15) -> pd.Da
     result = frame.copy()
     for n in (20, 60, 126, 252):
         result[f"rs_{n}d_percentile"] = np.nan
-    sector = result.get("sector", pd.Series("", index=result.index)).fillna("")
+    sector = result.get("sector_normalized", result.get("sector", pd.Series("", index=result.index))).fillna("")
     for _, idx in result.groupby(sector).groups.items():
-        peers = idx if len(idx) >= minimum_peers else result.index
         for n in (20, 60, 126, 252):
+            metric = f"return_{n}d_pct"
+            sector_valid = pd.to_numeric(result.loc[idx, metric], errors="coerce").dropna()
+            membership = sorted(str(result.loc[idx[0], "index_name"]).split("|"))[0].strip() if "index_name" in result and len(idx) else ""
+            memberships = result.get("index_name", pd.Series("", index=result.index)).fillna("").astype(str)
+            index_idx = result.index[memberships.map(lambda value: membership in [x.strip() for x in value.split("|")])]
+            index_valid = pd.to_numeric(result.loc[index_idx, metric], errors="coerce").dropna()
+            universe_valid = pd.to_numeric(result[metric], errors="coerce").dropna()
+            peers = sector_valid.index if len(sector_valid) >= minimum_peers else index_valid.index if len(index_valid) >= minimum_peers else universe_valid.index
+            method = "sector" if len(sector_valid) >= minimum_peers else "index" if len(index_valid) >= minimum_peers else "universe"
+            result.loc[idx, f"rs_{n}d_peer_method"] = method
+            result.loc[idx, f"rs_{n}d_peer_count"] = len(peers)
             result.loc[idx, f"rs_{n}d_percentile"] = percentile(
                 result.loc[peers, f"return_{n}d_pct"]
             ).reindex(idx)
@@ -95,7 +115,7 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
     stability = curve(
         row.get("return_1d_pct"), [(-8, 0), (-2, 35), (0, 80), (2, 100), (6, 45)]
     )
-    trend = np.nanmean(
+    trend = safe_nanmean(
         [
             curve(
                 row.get("price_vs_ma50_pct"), [(-20, 0), (0, 65), (15, 100), (35, 50)]
@@ -136,7 +156,7 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
     breakoutvol = curve(
         row.get("relative_volume_1d"), [(0.5, 20), (1, 50), (1.5, 85), (2.5, 100)]
     )
-    momentum = np.nanmean(
+    momentum = safe_nanmean(
         [
             curve(
                 row.get("return_20d_pct"),
@@ -157,7 +177,7 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
             "breakout": breakout,
             "volume": breakoutvol,
             "momentum": momentum,
-            "alignment": np.nanmean([alignment, over]),
+            "alignment": safe_nanmean([alignment, over]),
         },
         {"breakout": 0.30, "volume": 0.25, "momentum": 0.25, "alignment": 0.20},
         0.70,
@@ -186,7 +206,7 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
         quality = (
             np.nan
             if pd.isna(pull) and pd.isna(breakout_score)
-            else np.nanmean([pull, breakout_score])
+            else safe_nanmean([pull, breakout_score])
         )
     status = "INSUFFICIENT_DATA" if pd.isna(quality) else "RANKED"
     return {
