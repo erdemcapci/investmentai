@@ -1,25 +1,19 @@
 """Yahoo parsing and download helpers extracted from the original notebook."""
+
 from __future__ import annotations
 
-import json
 import logging
 import math
-import random
 import re
-import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
-
-
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 STOXX600_URL = "https://en.wikipedia.org/wiki/STOXX_Europe_600"
@@ -28,15 +22,27 @@ SUPPORTED_INDEXES = ("sp500", "stoxx600")
 # Yahoo's European symbols use the primary exchange suffix.  The public STOXX
 # table exposes country and local ticker rather than a vendor-specific symbol.
 YAHOO_SUFFIX_BY_COUNTRY = {
-    "austria": ".VI", "belgium": ".BR", "denmark": ".CO",
-    "finland": ".HE", "france": ".PA", "germany": ".DE",
-    "ireland": ".IR", "italy": ".MI", "netherlands": ".AS",
-    "norway": ".OL", "poland": ".WA", "portugal": ".LS",
-    "spain": ".MC", "sweden": ".ST", "switzerland": ".SW",
-    "united kingdom": ".L", "uk": ".L",
+    "austria": ".VI",
+    "belgium": ".BR",
+    "denmark": ".CO",
+    "finland": ".HE",
+    "france": ".PA",
+    "germany": ".DE",
+    "ireland": ".IR",
+    "italy": ".MI",
+    "netherlands": ".AS",
+    "norway": ".OL",
+    "poland": ".WA",
+    "portugal": ".LS",
+    "spain": ".MC",
+    "sweden": ".ST",
+    "switzerland": ".SW",
+    "united kingdom": ".L",
+    "uk": ".L",
 }
 
 RATE_LIMIT_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
+
 
 @dataclass
 class ApiResult:
@@ -80,7 +86,9 @@ def safe_int(value: Any) -> int | float:
     return int(number) if not np.isnan(number) else np.nan
 
 
-def first_present(mapping: dict[str, Any] | None, keys: Iterable[str], default: Any = np.nan) -> Any:
+def first_present(
+    mapping: dict[str, Any] | None, keys: Iterable[str], default: Any = np.nan
+) -> Any:
     if not isinstance(mapping, dict):
         return default
     for key in keys:
@@ -105,16 +113,12 @@ def clean_column_name(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
 
 
-
-
 def safe_divide(numerator: Any, denominator: Any) -> float:
     n = safe_float(numerator)
     d = safe_float(denominator)
     if np.isnan(n) or np.isnan(d) or d == 0:
         return np.nan
     return n / d
-
-
 
 
 def make_unique_columns(columns: Iterable[Any]) -> list[str]:
@@ -163,8 +167,12 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
             source = next((name for name in aliases if name in frame.columns), None)
             normalized[output_name] = frame[source] if source else pd.NA
 
-        normalized["sp500_ticker"] = normalized["symbol"].astype(str).str.strip().str.upper()
-        normalized["symbol"] = normalized["sp500_ticker"].map(normalize_symbol_for_yahoo)
+        normalized["sp500_ticker"] = (
+            normalized["symbol"].astype(str).str.strip().str.upper()
+        )
+        normalized["symbol"] = normalized["sp500_ticker"].map(
+            normalize_symbol_for_yahoo
+        )
         normalized["index_name"] = "S&P 500"
         normalized["constituent_list_fetched_at_utc"] = utc_now_iso()
         normalized = normalized.drop_duplicates("symbol").reset_index(drop=True)
@@ -201,8 +209,11 @@ def yahoo_symbol_for_europe(local_ticker: Any, country: Any) -> str:
 def _find_stoxx_table(tables: list[pd.DataFrame]) -> pd.DataFrame:
     for table in tables:
         columns = {clean_column_name(c) for c in table.columns}
-        if ({"company", "ticker", "country"} <= columns or
-                {"company_name", "ticker", "country"} <= columns):
+        if {"company", "ticker", "country"} <= columns or {
+            "company_name",
+            "ticker",
+            "country",
+        } <= columns:
             result = table.copy()
             result.columns = [clean_column_name(c) for c in result.columns]
             return result
@@ -217,7 +228,9 @@ def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
         response.raise_for_status()
         raw = _find_stoxx_table(pd.read_html(StringIO(response.text)))
         company_column = "company" if "company" in raw else "company_name"
-        industry_column = next((c for c in ("industry", "icb_sector", "sector") if c in raw), None)
+        industry_column = next(
+            (c for c in ("industry", "icb_sector", "sector") if c in raw), None
+        )
         rows = []
         for _, item in raw.iterrows():
             try:
@@ -225,18 +238,22 @@ def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
             except ValueError as exc:
                 logging.warning(
                     "Skipping unmappable STOXX constituent %r (%r): %s",
-                    item.get(company_column), item.get("ticker"), exc,
+                    item.get(company_column),
+                    item.get("ticker"),
+                    exc,
                 )
                 continue
-            rows.append({
-                "symbol": symbol,
-                "stoxx_ticker": str(item["ticker"]).strip().upper(),
-                "security": item[company_column],
-                "gics_sector": item[industry_column] if industry_column else pd.NA,
-                "country": item["country"],
-                "index_name": "STOXX Europe 600",
-                "constituent_list_fetched_at_utc": utc_now_iso(),
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "stoxx_ticker": str(item["ticker"]).strip().upper(),
+                    "security": item[company_column],
+                    "gics_sector": item[industry_column] if industry_column else pd.NA,
+                    "country": item["country"],
+                    "index_name": "STOXX Europe 600",
+                    "constituent_list_fetched_at_utc": utc_now_iso(),
+                }
+            )
         if not rows:
             raise ValueError("No mappable STOXX Europe 600 constituents were found")
         normalized = pd.DataFrame(rows).drop_duplicates("symbol").reset_index(drop=True)
@@ -259,7 +276,9 @@ def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     value, which avoids losing useful fields when an overlapping listing has a
     sparse row in one of the source tables.
     """
-    available = [frame.copy() for frame in frames if frame is not None and not frame.empty]
+    available = [
+        frame.copy() for frame in frames if frame is not None and not frame.empty
+    ]
     if not available:
         raise ValueError("No index constituent rows were supplied")
 
@@ -267,7 +286,9 @@ def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     required = {"symbol", "index_name"}
     missing = required - set(combined.columns)
     if missing:
-        raise ValueError(f"Constituent data is missing required columns: {sorted(missing)}")
+        raise ValueError(
+            f"Constituent data is missing required columns: {sorted(missing)}"
+        )
 
     combined["symbol"] = combined["symbol"].astype(str).str.strip().str.upper()
     combined = combined.loc[combined["symbol"].ne("") & combined["symbol"].ne("NAN")]
@@ -278,12 +299,15 @@ def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
         return present.iloc[0] if not present.empty else pd.NA
 
     metadata_columns = [
-        column for column in combined.columns
-        if column not in {"symbol", "index_name"}
+        column for column in combined.columns if column not in {"symbol", "index_name"}
     ]
-    metadata = combined.groupby("symbol", sort=False)[metadata_columns].agg(
-        first_present_value
-    ) if metadata_columns else pd.DataFrame(index=combined["symbol"].drop_duplicates())
+    metadata = (
+        combined.groupby("symbol", sort=False)[metadata_columns].agg(
+            first_present_value
+        )
+        if metadata_columns
+        else pd.DataFrame(index=combined["symbol"].drop_duplicates())
+    )
     memberships = combined.groupby("symbol", sort=False)["index_name"].agg(
         lambda values: " | ".join(dict.fromkeys(v for v in values if v))
     )
@@ -302,7 +326,9 @@ def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     return result
 
 
-def fetch_index_constituents(cache_dir: Path, indexes: Iterable[str] = SUPPORTED_INDEXES) -> pd.DataFrame:
+def fetch_index_constituents(
+    cache_dir: Path, indexes: Iterable[str] = SUPPORTED_INDEXES
+) -> pd.DataFrame:
     """Fetch and combine requested indexes while retaining overlapping membership."""
     requested = tuple(dict.fromkeys(str(name).lower() for name in indexes))
     unknown = set(requested) - set(SUPPORTED_INDEXES)
@@ -313,6 +339,7 @@ def fetch_index_constituents(cache_dir: Path, indexes: Iterable[str] = SUPPORTED
     if "sp500" in requested:
         frames.append(fetch_sp500_constituents(cache_dir / "sp500_constituents.csv"))
     if "stoxx600" in requested:
-        frames.append(fetch_stoxx600_constituents(cache_dir / "stoxx600_constituents.csv"))
+        frames.append(
+            fetch_stoxx600_constituents(cache_dir / "stoxx600_constituents.csv")
+        )
     return combine_index_constituents(frames)
-

@@ -39,3 +39,13 @@ With `EXPORT_RESULTS=true`, one run directory contains `full_analysis.csv`, both
 ## Limitations
 
 Yahoo fields and geographic coverage vary and may be delayed or absent. Currency-normalized benchmark strength is intentionally deferred; peer return percentiles avoid pretending mixed-currency absolute returns are a benchmark. Generic ROIC is omitted for financial companies. Historical revenue/target estimate momentum only becomes usable after locally collected point-in-time history exists. This is research decision support, not investment advice or a validated backtest; current analyst observations are never applied retroactively to historical prices.
+
+## v3.0.1 request budget and integrity rules
+
+A completely cold run makes one batched two-year price download, then, per symbol, up to nine analyst-component calls plus one small `info` call, one valuation call, and three annual-statement calls. For roughly 1,100 symbols this is about 11,000 analyst/info endpoint calls, 1,100 valuation calls, 3,300 annual fundamental calls, and one logical batched price call (which Yahoo may internally shard). Component TTL caches make warm runs substantially cheaper. The three previously discarded quarterly-statement calls per symbol were removed, saving roughly 3,300 cold-run requests.
+
+Analyst components cache independently. A malformed or failed component cannot overwrite its prior successful observation. Stale fallback retains the original `fetched_at_utc`; only a genuinely provider-fetched analyst component permits a point-in-time snapshot, keyed by that observation timestamp, so a later failed refresh cannot manufacture history. Future-dated cache timestamps are treated as age zero but do not extend freshness beyond normal TTL handling.
+
+Target and revenue revision momentum remain unknown until a local observation exists at or before each 7/30/90-day cutoff. The Expectations pillar consumes those history-derived scores directly. Rank and score changes use the closest stored run at least seven days old; positive rank delta means improvement.
+
+Provider limitations remain: Yahoo can omit endpoints by exchange, financial-company regulatory capital data is not consistently available, mixed-currency returns are peer ranks rather than currency-normalized benchmark excess returns, and event dates may be tentative. Bank leverage is therefore not inferred from industrial debt ratios, and missing regulatory metrics reduce confidence rather than being invented.
