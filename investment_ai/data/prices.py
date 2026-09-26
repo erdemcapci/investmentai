@@ -7,7 +7,6 @@ from investment_ai.features.technical import price_features
 
 
 def _download_chunk(symbols: list[str], period: str) -> pd.DataFrame:
-    error = None
     for attempt in range(PRICE_DOWNLOAD_ATTEMPTS):
         try:
             value = yf.download(tickers=symbols, period=period, interval="1d",
@@ -17,8 +16,7 @@ def _download_chunk(symbols: list[str], period: str) -> pd.DataFrame:
                     value = pd.concat({symbols[0]: value}, axis=1)
                 return value
             raise ValueError("empty price response")
-        except Exception as exc:
-            error = exc
+        except Exception:
             if attempt + 1 < PRICE_DOWNLOAD_ATTEMPTS:
                 time.sleep(.25 * (2 ** attempt))
     return pd.DataFrame()

@@ -5,6 +5,8 @@ import re
 from typing import Any
 import numpy as np
 import pandas as pd
+from investment_ai.config import MIN_PEERS
+from investment_ai.features.peers import resolve_metric_peers
 from investment_ai.scoring.common import number, percentile
 
 ALIASES = {
@@ -61,38 +63,26 @@ def parse_valuation(frame: Any) -> dict[str, Any]:
 
 
 def add_peer_percentiles(
-    frame: pd.DataFrame, metrics: dict[str, bool], minimum_peers: int = 15
+    frame: pd.DataFrame, metrics: dict[str, bool], minimum_peers: int = MIN_PEERS
 ) -> pd.DataFrame:
     result = frame.copy()
-    for metric in metrics:
+    for metric, higher in metrics.items():
         result[f"{metric}_peer_percentile"] = np.nan
         result[f"{metric}_peer_method"] = "universe"
         result[f"{metric}_peer_count"] = 0
-    sectors = result.get(
-        "sector_normalized", result.get("sector", pd.Series("", index=result.index))
-    ).fillna("")
-    for _, indices in result.groupby(sectors).groups.items():
-        for metric, higher in metrics.items():
-            if metric in result:
-                sector_valid = pd.to_numeric(result.loc[indices, metric], errors="coerce").dropna()
-                membership = ""
-                if "index_name" in result and len(indices):
-                    membership = sorted(str(result.loc[indices[0], "index_name"]).split("|"))[0].strip()
-                memberships = result.get("index_name", pd.Series("", index=result.index)).fillna("").astype(str)
-                index_idx = result.index[memberships.map(lambda value: membership in [x.strip() for x in value.split("|")])]
-                index_valid = pd.to_numeric(result.loc[index_idx, metric], errors="coerce").dropna()
-                universe_valid = pd.to_numeric(result[metric], errors="coerce").dropna()
-                if len(sector_valid) >= minimum_peers:
-                    peers, method = sector_valid.index, "sector"
-                elif len(index_valid) >= minimum_peers:
-                    peers, method = index_valid.index, "index"
-                else:
-                    peers, method = universe_valid.index, "universe"
-                result.loc[indices, f"{metric}_peer_method"] = method
-                result.loc[indices, f"{metric}_peer_count"] = len(peers)
-                result.loc[indices, f"{metric}_peer_percentile"] = percentile(
-                    result.loc[peers, metric], higher
-                ).reindex(indices)
+        result[f"{metric}_peer_index"] = ""
+        if metric not in result:
+            continue
+        for row_index in result.index:
+            peers, method, peer_index = resolve_metric_peers(
+                result, row_index, metric, minimum_peers
+            )
+            ranks = percentile(result.loc[peers, metric], higher)
+            result.at[row_index, f"{metric}_peer_method"] = method
+            result.at[row_index, f"{metric}_peer_count"] = len(peers)
+            result.at[row_index, f"{metric}_peer_index"] = peer_index
+            if row_index in ranks.index:
+                result.at[row_index, f"{metric}_peer_percentile"] = ranks.loc[row_index]
     result["peer_group_method"] = result.get("forward_pe_peer_method", "universe")
     result["peer_group_size"] = result.get("forward_pe_peer_count", 0)
     return result

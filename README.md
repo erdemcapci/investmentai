@@ -49,3 +49,29 @@ Analyst components cache independently under schema version 2. Cached payloads m
 Target and revenue revision momentum remain unknown until a local observation exists at or before each 7/30/90-day cutoff. Separate Long Expectations and Short Expectations pillars use medium/long-horizon and recency-weighted near-term signals respectively; direction uses directional inputs only. Rank and score changes use the closest stored run at least seven days old; positive rank delta means improvement.
 
 Provider limitations remain: Yahoo can omit endpoints by exchange, financial-company regulatory capital data is not consistently available, mixed-currency returns are peer ranks rather than currency-normalized benchmark excess returns, and event dates may be tentative. Bank leverage is therefore not inferred from industrial debt ratios, and missing regulatory metrics reduce confidence rather than being invented.
+
+### v3.1.1 correctness semantics
+
+- Analyst momentum reads only component-specific `analyst_observations`; the legacy
+  wide snapshot table is archival and never participates in scoring.
+- Every valuation and relative-strength metric resolves peers independently for
+  each security: at least 15 valid normalized-sector observations, otherwise the
+  security's own qualifying index, otherwise all valid universe observations.
+  With multiple qualifying indexes, the largest valid set wins and a count tie is
+  resolved by the lexically first canonical index name.
+- A primary short-term score requires a credible `PULLBACK`, `BREAKOUT`,
+  `MOMENTUM_CONTINUATION`, or `MIXED` setup. Diagnostics remain available for
+  `NONE` setups, but their score is unavailable and they cannot be ranked.
+- Driver contribution points are `headline weight * (pillar score - 50)`, using
+  the distinct published LT and ST pillar weights rather than sharing LT drivers.
+- Component freshness multipliers are 1.00 (provider), 0.95 (fresh cache), 0.50
+  (stale fallback), 0.40 (partial), and 0.00 (error/insufficient). Confidence is
+  45% coverage, 20% analyst breadth, 20% mean status freshness, and 15% component
+  success (the same component-level mean); financials receive a 10% confidence
+  reduction because reliable CET1, NPL, NIM, and regulatory-capital fields are not
+  available. Confidence does not alter attractiveness scores.
+- One-day relative volume is the latest completed session divided by the mean of
+  the preceding 20 completed sessions. Five-day relative volume is the mean of
+  the latest five divided by the preceding, non-overlapping 55 sessions.
+- Yahoo forward growth is expected as a decimal (`0.20` means 20%). Absolute
+  values above 5 are rejected as suspicious instead of being guessed or rescaled.

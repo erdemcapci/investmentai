@@ -107,11 +107,6 @@ class HistoryStore:
             "SELECT value FROM analyst_observations WHERE symbol=? AND field=? AND snapshot_date<=? ORDER BY observed_at_utc DESC LIMIT 1",
             (symbol, field, cutoff),
         ).fetchone()
-        if not row:  # backward-compatible access to pre-v3.1 history
-            row = self.db.execute(
-                f"SELECT {field} FROM analyst_snapshots WHERE symbol=? AND snapshot_date<=? AND {field} IS NOT NULL ORDER BY snapshot_date DESC LIMIT 1",
-                (symbol, cutoff),
-            ).fetchone()
         current = pd.to_numeric(current, errors="coerce")
         if not row or not row[0] or pd.isna(current):
             return np.nan, "HISTORY_NOT_YET_AVAILABLE"

@@ -324,8 +324,11 @@ def test_same_observation_timestamp_not_duplicated(tmp_path):
 def test_target_and_revenue_history_only_after_elapsed_days(tmp_path):
     store = HistoryStore(tmp_path / "history.db")
     now = datetime.now(timezone.utc)
-    store.upsert_analyst(
-        "A", {"target_median": 100, "revenue_0y_avg": 1000}, now - timedelta(days=31)
+    store.upsert_component(
+        "A", "targets", {"target_median": 100}, now - timedelta(days=31)
+    )
+    store.upsert_component(
+        "A", "revenue_estimate", {"revenue_0y_avg": 1000}, now - timedelta(days=31)
     )
     row = store.add_analyst_history_features(
         "A", {"target_median": 110, "revenue_0y_avg": 1200}, now

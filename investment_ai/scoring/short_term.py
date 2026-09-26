@@ -4,6 +4,9 @@ import pandas as pd
 from investment_ai.features.technical import event_timing_score, setup_scores
 from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted, safe_nanmean
 
+NO_CREDIBLE_SETUP = "NO_CREDIBLE_SETUP"
+CREDIBLE_SETUPS = {"PULLBACK", "BREAKOUT", "MOMENTUM_CONTINUATION", "MIXED"}
+
 
 def score_short_term(row: dict) -> dict:
     setup = setup_scores(row)
@@ -60,7 +63,9 @@ def score_short_term(row: dict) -> dict:
         and pd.notna(row.get("expectations_short_score"))
         and row.get("expectations_short_coverage", 0) >= 0.60
     )
-    if not core_ok:
+    if setup["short_term_setup"] not in CREDIBLE_SETUPS:
+        score, status = np.nan, NO_CREDIBLE_SETUP
+    elif not core_ok:
         score, status = np.nan, INSUFFICIENT_DATA
     return {
         **setup,

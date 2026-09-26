@@ -229,6 +229,7 @@ def test_numeric_ranking_and_ties():
                 "expectations_score": 50,
                 "quality_score": 50,
                 "short_rs_score": 50,
+                "short_term_setup": "PULLBACK",
             },
             {
                 "symbol": "b",
@@ -238,6 +239,7 @@ def test_numeric_ranking_and_ties():
                 "expectations_score": 50,
                 "quality_score": 50,
                 "short_rs_score": 50,
+                "short_term_setup": "BREAKOUT",
             },
         ]
     )
@@ -267,8 +269,8 @@ def test_snapshot_upsert_and_missing_history(tmp_path):
 
 def test_history_available(tmp_path):
     h = HistoryStore(tmp_path / "h.db")
-    h.upsert_analyst(
-        "X", {"target_mean": 10}, datetime.now(timezone.utc) - timedelta(days=31)
+    h.upsert_component(
+        "X", "targets", {"target_mean": 10}, datetime.now(timezone.utc) - timedelta(days=31)
     )
     v, s = h.historical_change("X", "target_mean", 30, 12)
     assert v == 20 and s == "AVAILABLE"

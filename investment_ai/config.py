@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-SCORING_MODEL_VERSION = "3.1"
+SCORING_MODEL_VERSION = "3.1.1"
 TOP_N = int(os.getenv("TOP_N", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
 FORCE_REFRESH = os.getenv("FORCE_REFRESH", "false").lower() in {"1", "true", "yes", "y"}

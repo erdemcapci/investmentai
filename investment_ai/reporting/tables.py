@@ -26,8 +26,8 @@ LT_COLUMNS = [
     "eps_0q_change_30d_pct",
     "forward_eps_growth",
     "forward_revenue_growth",
-    "top_positive_driver",
-    "top_negative_driver",
+    "lt_top_positive_driver",
+    "lt_top_negative_driver",
 ]
 ST_COLUMNS = [
     "short_term_rank",
@@ -55,8 +55,8 @@ ST_COLUMNS = [
     "return_20d_pct",
     "drawdown_from_20d_high_pct",
     "days_to_next_earnings",
-    "top_positive_driver",
-    "top_negative_driver",
+    "st_top_positive_driver",
+    "st_top_negative_driver",
 ]
 
 

@@ -3,6 +3,30 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from investment_ai.scoring.common import INSUFFICIENT_DATA, RANKED, curve, weighted, safe_nanmean
+from investment_ai.status import (
+    ERROR,
+    FRESH,
+    FRESH_CACHE,
+    FRESH_PROVIDER,
+    INSUFFICIENT,
+    PARTIAL,
+    STALE_FALLBACK,
+)
+
+COMPONENT_STATUS_MULTIPLIERS = {
+    FRESH_PROVIDER: 1.00,
+    FRESH_CACHE: 0.95,
+    FRESH: 1.00,
+    STALE_FALLBACK: 0.50,
+    PARTIAL: 0.40,
+    ERROR: 0.00,
+    INSUFFICIENT: 0.00,
+}
+ANALYST_COMPONENTS = (
+    "targets", "recommendations", "eps_trend", "eps_revisions",
+    "revenue_estimate", "earnings_estimate", "rating_actions",
+    "earnings_history", "earnings_dates",
+)
 
 
 def market_price_risk_score(row: dict) -> float:
@@ -29,6 +53,7 @@ def risk_and_confidence(row: dict) -> dict:
         market = market_price_risk_score(row)
     if row.get("is_financial", False):
         balance = np.nan
+        balance_reason = "FINANCIAL_SECTOR_GENERIC_METRICS_NOT_APPLICABLE"
     else:
         balance = safe_nanmean(
             [
@@ -37,8 +62,23 @@ def risk_and_confidence(row: dict) -> dict:
                 curve(row.get("interest_coverage"), [(0, 100), (3, 55), (10, 10)]),
             ]
         )
-        if row.get("negative_equity_flag") or row.get("negative_ebitda_flag") or row.get("negative_operating_profit_flag"):
+        net_debt = pd.to_numeric(row.get("net_debt"), errors="coerce")
+        net_cash = bool(row.get("net_cash_flag")) or (pd.notna(net_debt) and net_debt <= 0)
+        if row.get("negative_equity_flag"):
             balance = 100.0
+            balance_reason = "NEGATIVE_EQUITY"
+        elif row.get("negative_ebitda_flag") and pd.notna(net_debt) and net_debt > 0:
+            balance = max(balance, 95.0) if pd.notna(balance) else 95.0
+            balance_reason = "NEGATIVE_EBITDA_WITH_POSITIVE_NET_DEBT"
+        elif row.get("negative_ebitda_flag") and net_cash:
+            balance_reason = "NEGATIVE_EBITDA_WITH_NET_CASH_METRIC_BASED"
+        elif row.get("negative_operating_profit_flag") and pd.notna(net_debt) and net_debt > 0:
+            balance = max(balance, 90.0) if pd.notna(balance) else 90.0
+            balance_reason = "NEGATIVE_OPERATING_PROFIT_WITH_POSITIVE_NET_DEBT"
+        elif row.get("negative_operating_profit_flag"):
+            balance_reason = "NEGATIVE_OPERATING_PROFIT_METRIC_BASED"
+        else:
+            balance_reason = "ORDINARY_METRIC_BASED"
     event = 100 - row.get("event_timing_score", np.nan)
     target_dispersion = row.get("target_dispersion_pct")
     disagreement, _, _ = weighted(
@@ -78,9 +118,18 @@ def risk_and_confidence(row: dict) -> dict:
         tier: _age_hours(row.get(f"{tier}_fetched_at_utc"))
         for tier in ("analyst", "valuation", "fundamentals")
     }
-    freshness = safe_nanmean(
-        [curve(age, [(0, 100), (24, 90), (168, 50), (720, 0)]) for age in ages.values()]
-    )
+    status_values = [row.get(f"{name}_cache_status", INSUFFICIENT) for name in ANALYST_COMPONENTS]
+    system_statuses = status_values + [
+        row.get("valuation_cache_status", INSUFFICIENT),
+        row.get("fundamental_cache_status", INSUFFICIENT),
+        row.get("price_data_status", INSUFFICIENT),
+    ]
+    status_scores = [COMPONENT_STATUS_MULTIPLIERS.get(value, 0.0) for value in system_statuses]
+    freshness = safe_nanmean(status_scores) * 100
+    analyst_status_scores = [COMPONENT_STATUS_MULTIPLIERS.get(value, 0.0) for value in status_values]
+    analyst_fresh_count = sum(score >= 0.95 for score in analyst_status_scores)
+    analyst_stale_count = sum(0 < score < 0.95 for score in analyst_status_scores)
+    analyst_error_count = sum(status == ERROR for status in status_values)
     coverage = (
         safe_nanmean(
             [
@@ -97,11 +146,15 @@ def risk_and_confidence(row: dict) -> dict:
             "coverage": coverage,
             "analyst": analyst,
             "freshness": freshness,
-            "provider": row.get("provider_success", 0) * 100,
+            "provider": freshness,
         },
         {"coverage": 0.45, "analyst": 0.20, "freshness": 0.20, "provider": 0.15},
         0,
     )
+    # Reliable CET1/NPL/NIM/regulatory-capital inputs are unavailable; do not
+    # invent proxies, and make that sector-specific limitation visible here.
+    if row.get("is_financial", False) and pd.notna(confidence):
+        confidence *= 0.90
     return {
         "risk_score": risk,
         "risk_coverage": risk_coverage,
@@ -110,8 +163,13 @@ def risk_and_confidence(row: dict) -> dict:
         "market_risk_score": market,
         "market_price_risk_score": market,
         "balance_sheet_risk_score": balance,
+        "balance_sheet_risk_reason": balance_reason,
         "analyst_disagreement_score": disagreement,
         "analyst_freshness_age_hours": ages["analyst"],
         "valuation_freshness_age_hours": ages["valuation"],
         "fundamental_freshness_age_hours": ages["fundamentals"],
+        "analyst_component_freshness_score": safe_nanmean(analyst_status_scores) * 100,
+        "analyst_component_fresh_count": analyst_fresh_count,
+        "analyst_component_stale_count": analyst_stale_count,
+        "analyst_component_error_count": analyst_error_count,
     }
