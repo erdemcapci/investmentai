@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-APPLICATION_VERSION = "1.1.2"
+APPLICATION_VERSION = "1.1.3"
 SCORING_MODEL_VERSION = "3.1.2"
 DATABASE_SCHEMA_VERSION = 5
 CACHE_SCHEMA_VERSION = 4

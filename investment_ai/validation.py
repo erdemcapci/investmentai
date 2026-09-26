@@ -226,8 +226,19 @@ def _per_run(frame: pd.DataFrame, horizon: str) -> pd.DataFrame:
 
 
 def _aggregate(runs: pd.DataFrame, stock_observations: int) -> dict:
-    count = len(runs)
+    historical_count = len(runs)
+    selected = runs.get("top_10_selected_count", pd.Series(dtype=float))
+    selected_matured = runs.get("top_10_matured_count", pd.Series(dtype=float))
+    matured_count = int((selected.gt(0) & selected_matured.eq(selected)).sum())
+    top_counts = {
+        n: int(runs.get(f"top_{n}_equal_weight_return", pd.Series(dtype=float)).notna().sum())
+        for n in (10, 25, 50)
+    }
+    count = top_counts[10]
     result = {
+        "historical_run_count": historical_count,
+        "matured_run_count": matured_count,
+        "evaluable_run_count": count,
         "number_of_evaluation_runs": count,
         "evaluation_run_count": count,
         "stock_observation_count": stock_observations,
@@ -244,6 +255,8 @@ def _aggregate(runs: pd.DataFrame, stock_observations: int) -> dict:
         ).dropna()
         result.update(
             {
+                f"top{n}_evaluation_run_count": top_counts[n],
+                f"top{n}_sample_status": sample_status(top_counts[n]),
                 f"mean_top{n}_return": values.mean() if len(values) else None,
                 f"median_top{n}_return": values.median() if len(values) else None,
                 f"top{n}_hit_rate": values.gt(0).mean() if len(values) else None,
@@ -255,6 +268,7 @@ def _aggregate(runs: pd.DataFrame, stock_observations: int) -> dict:
     ic = runs.get("cross_sectional_spearman_ic", pd.Series(dtype=float)).dropna()
     result.update(
         {
+            "ic_evaluation_run_count": len(ic),
             "mean_ic": ic.mean() if len(ic) else None,
             "median_ic": ic.median() if len(ic) else None,
             "ic_positive_rate": ic.gt(0).mean() if len(ic) else None,
