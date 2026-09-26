@@ -1,4 +1,4 @@
-"""Investment AI v1.0 entry point. Canonical usage: ``python main.py``."""
+"""Investment AI v1.1 entry point. Canonical usage: ``python main.py``."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import sys
 import time
 import uuid
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -36,12 +36,14 @@ from investment_ai.data.constituents import fetch_index_constituents
 from investment_ai.data.history_store import HistoryStore
 from investment_ai.data.prices import (
     build_price_features,
-    download_prices,
+    download_prices,  # noqa: F401 - retained for integration monkeypatch compatibility
+    download_prices_range,
     symbol_history,
 )
 from investment_ai.data.symbol_resolver import SymbolResolver
 from investment_ai.data.price_store import PriceStore, price_quality
 from investment_ai.data.yahoo import YahooClient
+from investment_ai.health import constituent_source_health
 from investment_ai.features.benchmark import BENCHMARKS, attach_benchmark_prices
 from investment_ai.pipeline import build_analysis
 from investment_ai.reporting.export import export_run
@@ -77,22 +79,38 @@ def download_combined_constituents() -> pd.DataFrame:
             "Both constituent sources are required for the combined universe"
         )
     connection = sqlite3.connect(HISTORY_DB)
-    resolver = SymbolResolver(connection)
+    resolver = SymbolResolver(
+        connection, metadata_lookup=YahooClient(JsonCache(CACHE_DIR)).metadata_lookup
+    )
     resolved = []
     for row in frame.to_dict("records"):
+        def present(name: str, fallback: str = ""):
+            value = row.get(name)
+            return value if pd.notna(value) and str(value).strip() else fallback
+
         source_index = str(row.get("index_name", ""))
-        source_symbol = str(
-            row.get("source_symbol") or row.get("stoxx_ticker") or row["symbol"]
+        source_value = next(
+            (
+                value
+                for value in (
+                    row.get("source_symbol"),
+                    row.get("stoxx_ticker"),
+                    row.get("symbol"),
+                )
+                if pd.notna(value) and str(value).strip()
+            ),
+            "",
         )
+        source_symbol = str(source_value)
         if "S&P 500" in source_index:
             # US source symbols have a deterministic Yahoo class-share convention.
             mapping = resolver.resolve(
                 source_index,
                 row["symbol"],
-                row.get("company_name") or row.get("security") or "",
+                present("company_name", present("security")),
                 "United States",
-                row.get("exchange"),
-                row.get("isin"),
+                present("exchange") or None,
+                present("isin") or None,
             )
             data = mapping.as_dict()
             data.update(
@@ -106,16 +124,80 @@ def download_combined_constituents() -> pd.DataFrame:
             data = resolver.resolve(
                 source_index,
                 source_symbol,
-                row.get("company_name") or row.get("security") or "",
-                row.get("country") or "",
-                row.get("exchange"),
-                row.get("isin"),
+                present("company_name", present("security")),
+                present("country"),
+                present("exchange") or None,
+                present("isin") or None,
             ).as_dict()
         row.update(data)
         row["symbol"] = data.get("canonical_yahoo_symbol") or row.get("symbol")
         resolved.append(row)
     connection.close()
     return pd.DataFrame(resolved)
+
+
+def _constituent_health(universe: pd.DataFrame, now: datetime) -> dict[str, dict]:
+    output = {}
+    memberships = universe.get("index_name", pd.Series("", index=universe.index)).astype(str)
+    for key, name in (("sp500", "S&P 500"), ("stoxx600", "STOXX Europe 600")):
+        source = universe[memberships.str.contains(name, regex=False)]
+        statuses = source.get("mapping_status", pd.Series("VERIFIED", index=source.index))
+        timestamps = source.get(
+            "constituent_list_fetched_at_utc", pd.Series(pd.NaT, index=source.index)
+        )
+        fetched = pd.to_datetime(
+            timestamps, utc=True, errors="coerce"
+        ).dropna()
+        # Legacy frozen artifacts have no age telemetry; do not invent staleness.
+        age = max(0.0, (now - fetched.min().to_pydatetime()).total_seconds() / 3600) if len(fetched) else 0.0
+        verified = int(statuses.eq("VERIFIED").sum())
+        health = constituent_source_health(
+            name, len(source), verified, age,
+            bool(source.get("constituent_source_cache_used", pd.Series(False, index=source.index)).fillna(False).astype(bool).any()),
+        )
+        health.update({
+            "raw_count": len(source),
+            "verified_mapping_count": verified,
+            "heuristic_mapping_count": int(statuses.eq("HEURISTIC").sum()),
+            "unresolved_count": int(statuses.eq("UNRESOLVED").sum()),
+            "ambiguous_count": int(statuses.eq("AMBIGUOUS").sum()),
+            "usable_mapping_pct": float(statuses.isin(["VERIFIED", "HEURISTIC"]).mean() * 100) if len(source) else 0.0,
+            "status": health["source_status"],
+        })
+        output[key] = health
+    return output
+
+
+def _incremental_price_history(
+    price_store: PriceStore,
+    securities: dict[str, str],
+    start: date,
+    end: date,
+) -> tuple[pd.DataFrame, int]:
+    """Fetch grouped missing windows, persist deltas, then reload canonical history."""
+    ranges = price_store.missing_ranges(securities, start, end)
+    groups: dict[tuple[date, date], list[tuple[str, str]]] = {}
+    for security_id, window in ranges.items():
+        groups.setdefault(window, []).append((security_id, securities[security_id]))
+    fetched_symbols = 0
+    for (fetch_start, fetch_end), members in groups.items():
+        symbols = [symbol for _, symbol in members]
+        delta = download_prices_range(symbols, fetch_start, fetch_end + timedelta(days=1))
+        fetched_symbols += len(symbols)
+        ids = {symbol: security_id for security_id, symbol in members}
+        rows = []
+        for symbol in symbols:
+            history = symbol_history(delta, symbol)
+            quality, flags = price_quality(history)
+            for day, bar in history.iterrows():
+                rows.append({
+                    "security_id": ids[symbol], "symbol": symbol, "date": day,
+                    "adjusted_close": bar.get("Close"), "raw_close": None,
+                    "volume": bar.get("Volume"), "source": "YAHOO",
+                    "quality_status": quality, "quality_flags": "|".join(flags),
+                })
+        price_store.upsert(rows)
+    return price_store.histories(securities), fetched_symbols
 
 
 def methodology() -> pd.DataFrame:
@@ -438,6 +520,18 @@ def execute(
             context.checkpoint["universe_loaded"] = True
             context.save_checkpoint()
         timings["universe_load_seconds"] = time.monotonic() - start
+        constituent_sources = _constituent_health(universe, datetime.now(timezone.utc))
+        universe_health_status = (
+            "INVALID"
+            if any(item["source_status"] == "INVALID" for item in constituent_sources.values())
+            else "DEGRADED"
+            if any(item["source_status"] == "DEGRADED" for item in constituent_sources.values())
+            else "VALID"
+        )
+        if frozen_mode and not source_manifest.get("constituent_sources"):
+            # Exact replay preserves the historical run contract; old frozen
+            # artifacts predate source-health telemetry.
+            universe_health_status = "VALID"
         mapping_columns = [
             "source_index",
             "source_symbol",
@@ -458,13 +552,46 @@ def execute(
             unmapped.reindex(columns=mapping_columns),
             context.directory / "unmapped_constituents.csv",
         )
+        analysis_universe = universe[
+            universe.get("mapping_status", pd.Series("VERIFIED", index=universe.index))
+            .isin(["VERIFIED", "HEURISTIC"])
+            & universe.symbol.notna()
+        ].copy()
 
         start = time.monotonic()
         downloaded = None
+        incremental_fetch_symbol_count = 0
         if frozen_mode or context.checkpoint["prices_complete"]:
             prices = _read(source / "price_features.csv")
+            if not frozen_mode:
+                benchmark_symbols = sorted({value[0] for value in BENCHMARKS.values()})
+                resume_store = HistoryStore(HISTORY_DB)
+                pending_symbols = resume_store.pending_outcome_symbols()
+                resume_store.close()
+                current_ids = dict(
+                    zip(
+                        analysis_universe.symbol,
+                        analysis_universe.get("security_id", analysis_universe.symbol),
+                    )
+                )
+                resume_symbols = list(
+                    dict.fromkeys(
+                        analysis_universe.symbol.tolist()
+                        + sorted(pending_symbols)
+                        + benchmark_symbols
+                    )
+                )
+                price_db = sqlite3.connect(HISTORY_DB)
+                local_prices = PriceStore(price_db)
+                downloaded = local_prices.histories({
+                    current_ids.get(symbol)
+                    or local_prices.security_id_for_symbol(symbol)
+                    or symbol: symbol
+                    for symbol in resume_symbols
+                })
+                price_db.close()
         else:
-            symbols = universe.symbol.tolist()
+            symbols = analysis_universe.symbol.tolist()
             benchmark_symbols = sorted({value[0] for value in BENCHMARKS.values()})
             pending_symbols = set()
             if HISTORY_DB.exists():
@@ -474,36 +601,30 @@ def execute(
             price_symbols = list(
                 dict.fromkeys(symbols + sorted(pending_symbols) + benchmark_symbols)
             )
-            downloaded = download_prices(price_symbols, PRICE_PERIOD)
             price_db = sqlite3.connect(HISTORY_DB)
             local_prices = PriceStore(price_db)
             security_ids = dict(
-                zip(universe.symbol, universe.get("security_id", universe.symbol))
+                zip(
+                    analysis_universe.symbol,
+                    analysis_universe.get("security_id", analysis_universe.symbol),
+                )
             )
-            price_rows = []
-            for price_symbol in price_symbols:
-                history = symbol_history(downloaded, price_symbol)
-                quality, flags = price_quality(history)
-                for day, bar in history.iterrows():
-                    close = bar.get("Close")
-                    price_rows.append(
-                        {
-                            "security_id": security_ids.get(price_symbol, price_symbol),
-                            "symbol": price_symbol,
-                            "date": day,
-                            "adjusted_close": close,
-                            "raw_close": close,
-                            "volume": bar.get("Volume"),
-                            "source": "YAHOO",
-                            "quality_status": quality,
-                            "quality_flags": "|".join(flags),
-                        }
-                    )
-            local_prices.upsert(price_rows)
+            securities = {
+                security_ids.get(symbol)
+                or local_prices.security_id_for_symbol(symbol)
+                or symbol: symbol
+                for symbol in price_symbols
+            }
+            downloaded, incremental_fetch_symbol_count = _incremental_price_history(
+                local_prices,
+                securities,
+                date.today() - timedelta(days=730),
+                date.today(),
+            )
             price_db.close()
             prices = build_price_features(downloaded, symbols)
             benchmark_prices = build_price_features(downloaded, benchmark_symbols)
-            prices = attach_benchmark_prices(universe, prices, benchmark_prices)
+            prices = attach_benchmark_prices(analysis_universe, prices, benchmark_prices)
             atomic_csv(prices, context.directory / "price_features.csv")
             context.checkpoint["prices_complete"] = True
             context.save_checkpoint()
@@ -513,7 +634,7 @@ def execute(
         provider = (
             _read(source / "normalized_provider.csv")
             if frozen_mode
-            else _provider_data(context, universe, logger)
+            else _provider_data(context, analysis_universe, logger)
         )
         timings["provider_fetch_seconds"] = time.monotonic() - start
 
@@ -548,7 +669,7 @@ def execute(
             atomic_csv(provider, context.directory / "normalized_provider.csv")
 
         start = time.monotonic()
-        full, long_term, short_term = build_analysis(universe, prices, provider)
+        full, long_term, short_term = build_analysis(analysis_universe, prices, provider)
         replay_verification = {}
         if replay:
             source_full = _read(source / "full_analysis.csv").set_index("symbol")
@@ -613,6 +734,19 @@ def execute(
                 .ne("")
                 .sum()
             ),
+            "constituent_sources": constituent_sources,
+            "fcf_yield_available_pct": _coverage(full, "fcf_yield"),
+            "fcf_currency_mismatch_count": int(
+                full.get("fcf_yield_currency_status", pd.Series(dtype=str))
+                .eq("CURRENCY_MISMATCH")
+                .sum()
+            ),
+            "fcf_currency_unavailable_count": int(
+                full.get("fcf_yield_currency_status", pd.Series(dtype=str))
+                .eq("CURRENCY_UNAVAILABLE")
+                .sum()
+            ),
+            "incremental_price_fetch_symbol_count": incremental_fetch_symbol_count,
         }
         statuses = provider.filter(regex="cache_status$").astype(str)
         for name, value in (
@@ -671,7 +805,15 @@ def execute(
         metrics["fresh_fetch_ratio"] = (
             metrics["fresh_provider_count"] / total_statuses if total_statuses else 0
         )
-        health_details = horizon_run_statuses(metrics)
+        health_details = horizon_run_statuses(metrics, universe_valid=universe_health_status)
+        universe_reasons = [
+            f"{key}: {reason}"
+            for key, item in constituent_sources.items()
+            for reason in item["status_reasons"]
+        ]
+        health_details["common_run_status_reasons"] = (
+            universe_reasons + health_details["common_run_status_reasons"]
+        )
         health = health_details["overall_run_status"]
         reasons = (
             health_details["common_run_status_reasons"]
@@ -798,9 +940,9 @@ def execute(
             context.checkpoint["history_saved"] = True
             context.save_checkpoint()
         if not frozen_mode and downloaded is not None:
-            from investment_ai.validation import update_outcomes
+            from investment_ai.validation import update_outcomes, validation_report
 
-            symbols = universe.symbol.tolist()
+            symbols = analysis_universe.symbol.tolist()
             benchmark_symbols = sorted({value[0] for value in BENCHMARKS.values()})
             outcome_symbols = sorted(set(symbols) | store.pending_outcome_symbols())
             histories = {
@@ -817,6 +959,12 @@ def execute(
                 },
             )
             context.checkpoint["outcomes_updated"] = True
+            from investment_ai.reporting.export import write_validation_snapshot
+
+            write_validation_snapshot(
+                context.directory / "validation_snapshot.json",
+                validation_report(store.db),
+            )
         timings["outcome_update_seconds"] = time.monotonic() - outcome_start
         metrics["outcome_update_seconds"] = round(timings["outcome_update_seconds"], 3)
         metrics["outcomes_updated_count"] = outcomes_updated
@@ -892,6 +1040,7 @@ Universe: {metrics["universe_count"]} | LT ranked: {metrics["lt_ranked_count"]} 
 Price coverage: {metrics["price_coverage_pct"]:.1f}% | Quality coverage: {metrics["quality_coverage_pct"]:.1f}% | Growth coverage: {metrics["growth_coverage_pct"]:.1f}%
 Valuation coverage: {metrics["valuation_coverage_pct"]:.1f}% | Long Expectations: {metrics["long_expectations_coverage_pct"]:.1f}% | Short Expectations: {metrics["short_expectations_coverage_pct"]:.1f}%
 Provider errors: {metrics["provider_error_symbol_count"]} | Stale fallbacks: {metrics["stale_fallback_count"]} | Outcome rows updated: {outcomes_updated}
+Constituents: S&P {constituent_sources['sp500']['source_status']} ({constituent_sources['sp500']['mapping_success_pct']:.1f}% verified) | STOXX {constituent_sources['stoxx600']['source_status']} ({constituent_sources['stoxx600']['mapping_success_pct']:.1f}% verified)
 Artifacts: {context.directory}""")
         logger.info("run end")
         return 0

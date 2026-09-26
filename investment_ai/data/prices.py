@@ -7,13 +7,20 @@ from investment_ai.config import PRICE_BATCH_SIZE, PRICE_DOWNLOAD_ATTEMPTS
 from investment_ai.features.technical import price_features
 
 
-def _download_chunk(symbols: list[str], period: str) -> pd.DataFrame:
+def _download_chunk(
+    symbols: list[str], period: str | None = None, start=None, end=None
+) -> pd.DataFrame:
     logger = logging.getLogger("investment_ai")
     logger.info("price chunk start size=%d", len(symbols), extra={"symbol": "-", "component": "price"})
     for attempt in range(PRICE_DOWNLOAD_ATTEMPTS):
         try:
-            value = yf.download(tickers=symbols, period=period, interval="1d",
-                                auto_adjust=True, group_by="ticker", threads=True, progress=False)
+            kwargs = {"tickers": symbols, "interval": "1d", "auto_adjust": True,
+                      "group_by": "ticker", "threads": True, "progress": False}
+            if start is not None:
+                kwargs.update(start=start, end=end)
+            else:
+                kwargs["period"] = period or "2y"
+            value = yf.download(**kwargs)
             if isinstance(value, pd.DataFrame) and not value.empty:
                 if len(symbols) == 1 and not isinstance(value.columns, pd.MultiIndex):
                     value = pd.concat({symbols[0]: value}, axis=1)
@@ -41,6 +48,18 @@ def download_prices(symbols: list[str], period="2y") -> pd.DataFrame:
     if successful_retries:
         combined = pd.concat([combined, *successful_retries], axis=1)
         combined = combined.loc[:, ~combined.columns.duplicated(keep="last")]
+    combined.attrs["requested_symbol_count"] = len(symbols)
+    return combined
+
+
+def download_prices_range(symbols: list[str], start, end) -> pd.DataFrame:
+    """Download one shared date window in bounded batches."""
+    chunks = [
+        _download_chunk(symbols[i : i + PRICE_BATCH_SIZE], start=start, end=end)
+        for i in range(0, len(symbols), PRICE_BATCH_SIZE)
+    ]
+    successful = [chunk for chunk in chunks if not chunk.empty]
+    combined = pd.concat(successful, axis=1) if successful else pd.DataFrame()
     combined.attrs["requested_symbol_count"] = len(symbols)
     return combined
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-APPLICATION_VERSION = "1.1.0"
+APPLICATION_VERSION = "1.1.1"
 SCORING_MODEL_VERSION = "3.1.1"
 DATABASE_SCHEMA_VERSION = 5
 CACHE_SCHEMA_VERSION = 3
@@ -36,6 +36,9 @@ CONSTITUENT_FRESH_HOURS = float(os.getenv("CONSTITUENT_FRESH_HOURS", "72"))
 CONSTITUENT_MAX_AGE_HOURS = float(os.getenv("CONSTITUENT_MAX_AGE_HOURS", "336"))
 PRICE_FRESH_VALID_PCT = float(os.getenv("PRICE_FRESH_VALID_PCT", "97"))
 PRICE_FRESH_INVALID_PCT = float(os.getenv("PRICE_FRESH_INVALID_PCT", "90"))
+TOP_N_MIN_OUTCOME_COVERAGE_PCT = float(
+    os.getenv("TOP_N_MIN_OUTCOME_COVERAGE_PCT", "80")
+)
 
 
 def validate_config() -> None:

@@ -175,6 +175,7 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
         )
         normalized["index_name"] = "S&P 500"
         normalized["constituent_list_fetched_at_utc"] = utc_now_iso()
+        normalized["constituent_source_cache_used"] = False
         normalized = normalized.drop_duplicates("symbol").reset_index(drop=True)
 
         normalized.to_csv(cache_path, index=False)
@@ -185,6 +186,7 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
         logging.warning("Could not refresh constituent list: %s", exc)
         if cache_path.exists():
             cached = pd.read_csv(cache_path)
+            cached["constituent_source_cache_used"] = True
             logging.warning("Using cached constituent list: %s", cache_path)
             return cached
         raise RuntimeError(
@@ -221,7 +223,7 @@ def _find_stoxx_table(tables: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
-    """Fetch current STOXX Europe 600 members, falling back to its own cache."""
+    """Fetch raw STOXX members without pre-empting authoritative resolution."""
     headers = {"User-Agent": "Mozilla/5.0 (compatible; InvestmentAI/1.0)"}
     try:
         response = requests.get(STOXX600_URL, headers=headers, timeout=45)
@@ -233,49 +235,43 @@ def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
         )
         rows = []
         for _, item in raw.iterrows():
-            try:
-                symbol = yahoo_symbol_for_europe(item["ticker"], item["country"])
-            except ValueError as exc:
-                logging.warning(
-                    "Skipping unmappable STOXX constituent %r (%r): %s",
-                    item.get(company_column),
-                    item.get("ticker"),
-                    exc,
-                )
-                continue
+            source_symbol = str(item.get("ticker", "")).strip()
             rows.append(
                 {
-                    "symbol": symbol,
-                    "stoxx_ticker": str(item["ticker"]).strip().upper(),
+                    # This is deliberately the source ticker. SymbolResolver is
+                    # the only authority allowed to produce a Yahoo symbol.
+                    "symbol": source_symbol,
+                    "source_symbol": source_symbol,
+                    "stoxx_ticker": source_symbol,
                     "security": item[company_column],
                     "gics_sector": item[industry_column] if industry_column else pd.NA,
                     "country": item["country"],
+                    "exchange": item.get("exchange", pd.NA),
+                    "isin": item.get("isin", pd.NA),
                     "index_name": "STOXX Europe 600",
                     "constituent_list_fetched_at_utc": utc_now_iso(),
+                    "constituent_source_cache_used": False,
                 }
             )
         if not rows:
-            raise ValueError("No mappable STOXX Europe 600 constituents were found")
-        normalized = pd.DataFrame(rows).drop_duplicates("symbol").reset_index(drop=True)
+            raise ValueError("No STOXX Europe 600 constituents were found")
+        normalized = pd.DataFrame(rows).drop_duplicates("source_symbol").reset_index(drop=True)
         normalized.to_csv(cache_path, index=False)
         logging.info("Loaded %s STOXX Europe 600 listings.", len(normalized))
         return normalized
     except Exception as exc:
         logging.warning("Could not refresh STOXX Europe 600 list: %s", exc)
         if cache_path.exists():
-            return pd.read_csv(cache_path)
+            cached = pd.read_csv(cache_path)
+            cached["constituent_source_cache_used"] = True
+            return cached
         raise RuntimeError(
             "STOXX Europe 600 list could not be downloaded and no cached list exists."
         ) from exc
 
 
 def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
-    """Normalize and deduplicate constituent frames by their Yahoo symbol.
-
-    Memberships are combined in source order.  Metadata uses the first non-null
-    value, which avoids losing useful fields when an overlapping listing has a
-    sparse row in one of the source tables.
-    """
+    """Combine source rows without vendor-symbol deduplication before resolution."""
     available = [
         frame.copy() for frame in frames if frame is not None and not frame.empty
     ]
@@ -290,28 +286,11 @@ def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
             f"Constituent data is missing required columns: {sorted(missing)}"
         )
 
-    combined["symbol"] = combined["symbol"].astype(str).str.strip().str.upper()
+    combined["symbol"] = combined["symbol"].astype(str).str.strip()
     combined = combined.loc[combined["symbol"].ne("") & combined["symbol"].ne("NAN")]
     combined["index_name"] = combined["index_name"].fillna("").astype(str)
 
-    def first_present_value(values: pd.Series) -> Any:
-        present = values.loc[values.notna()]
-        return present.iloc[0] if not present.empty else pd.NA
-
-    metadata_columns = [
-        column for column in combined.columns if column not in {"symbol", "index_name"}
-    ]
-    metadata = (
-        combined.groupby("symbol", sort=False)[metadata_columns].agg(
-            first_present_value
-        )
-        if metadata_columns
-        else pd.DataFrame(index=combined["symbol"].drop_duplicates())
-    )
-    memberships = combined.groupby("symbol", sort=False)["index_name"].agg(
-        lambda values: " | ".join(dict.fromkeys(v for v in values if v))
-    )
-    result = metadata.join(memberships).reset_index()
+    result = combined.reset_index(drop=True)
 
     # Expose stable aliases used by the v3 pipeline.
     alias_pairs = {
@@ -321,8 +300,11 @@ def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
         "sp500_ticker": "source_symbol",
     }
     for source, destination in alias_pairs.items():
-        if destination not in result and source in result:
-            result[destination] = result[source]
+        if source in result:
+            if destination not in result:
+                result[destination] = result[source]
+            else:
+                result[destination] = result[destination].combine_first(result[source])
     return result
 
 

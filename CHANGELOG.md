@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- Completed the final v1.1 integration of authoritative STOXX resolution,
+  universe health, provider currencies, unbiased validation cohorts, and the
+  incremental local price store. Scoring model weights remain unchanged.
+
 ## v1.1.0 — data integrity and validation correctness
 
 - Added durable security mappings, stable identities, explicit heuristic/unresolved states,

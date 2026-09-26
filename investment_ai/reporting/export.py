@@ -5,6 +5,27 @@ from investment_ai.reporting.tables import LT_COLUMNS, ST_COLUMNS
 from investment_ai.runtime import atomic_csv, atomic_json
 
 
+def write_validation_snapshot(path: Path, report: dict) -> None:
+    """Persist a compact current evidence summary, not detailed per-run tables."""
+    horizons = {}
+    for label, summary in report.items():
+        horizons[label] = {
+            "evaluation_runs": summary.get("evaluation_run_count", 0),
+            "sample_status": summary.get("sample_status"),
+            "matured_predictions": summary.get("matured_predictions", 0),
+            "matured_coverage_pct": summary.get("coverage_among_matured_pct", 0),
+            "top10_median_return": summary.get("median_top10_return"),
+            "top10_median_excess_return": summary.get("median_top10_excess"),
+            "median_ic": summary.get("median_ic"),
+        }
+    has_matured = any(item["matured_predictions"] for item in horizons.values())
+    atomic_json(path, {
+        "status": "EVIDENCE_AVAILABLE" if has_matured else "ACCUMULATING",
+        "automatic_weight_tuning": False,
+        "horizons": horizons,
+    })
+
+
 def export_run(
     directory: Path,
     full: pd.DataFrame,
