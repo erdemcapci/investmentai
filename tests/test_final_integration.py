@@ -129,7 +129,7 @@ def test_low_coverage_cohort_is_excluded_but_diagnostic_remains():
 def test_maturity_coverage_uses_only_matured_predictions(tmp_path):
     store = HistoryStore(tmp_path / "history.db")
     rows = [{"symbol": f"S{i}", "short_term_score": 50, "short_term_rank": i + 1} for i in range(100)]
-    store.save_predictions("r", "2025-01-01T00:00:00+00:00", "3.1.1", rows)
+    store.save_predictions("r", "2025-01-01T00:00:00+00:00", "3.1.2", rows)
     with store.db:
         for i in range(55):
             store.db.execute("UPDATE prediction_outcomes SET forward_5d_return=1 WHERE run_id='r' AND symbol=?", (f"S{i}",))

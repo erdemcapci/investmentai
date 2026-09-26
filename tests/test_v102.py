@@ -95,7 +95,7 @@ def test_health_gated_history(lt, st, expected, tmp_path):
     if rows:
         store.save_rankings("run", "2026-01-01T00:00:00+00:00", rows)
         store.save_predictions(
-            "run", "2026-01-01T00:00:00+00:00", "3.1.1", rows, lt, st, "DEGRADED"
+            "run", "2026-01-01T00:00:00+00:00", "3.1.2", rows, lt, st, "DEGRADED"
         )
     count = store.db.execute("SELECT count(*) FROM prediction_snapshots").fetchone()[0]
     if expected is None:
@@ -123,7 +123,7 @@ def test_validation_filters_invalid_but_keeps_degraded(tmp_path):
         store.save_predictions(
             run,
             "2025-01-01T00:00:00+00:00",
-            "3.1.1",
+            "3.1.2",
             _frame().to_dict("records"),
             lt,
             st,
@@ -152,7 +152,7 @@ def _source(tmp_path):
     for name in names:
         (source / name).write_text("symbol\nABC\n")
     manifest = {
-        "scoring_model_version": "3.1.1",
+        "scoring_model_version": "3.1.2",
         "scoring_code_fingerprint": scoring_code_fingerprint(),
         "artifact_sha256": {
             name: hashlib.sha256((source / name).read_bytes()).hexdigest()
@@ -186,7 +186,7 @@ def test_v3_to_v4_migration_and_explicit_insert_columns(tmp_path):
     old.db.commit()
     old.close()
     store = HistoryStore(path)
-    store.save_predictions("run", "now", "3.1.1", _frame().to_dict("records"))
+    store.save_predictions("run", "now", "3.1.2", _frame().to_dict("records"))
     columns = {
         row[1] for row in store.db.execute("PRAGMA table_info(prediction_snapshots)")
     }

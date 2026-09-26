@@ -94,6 +94,11 @@ def _meaningful(data: dict[str, Any]) -> bool:
 
 
 class YahooClient:
+    INFO_FIELDS = {
+        "symbol", "longName", "shortName", "country", "exchange",
+        "fullExchangeName", "quoteType", "sector", "currentPrice",
+        "regularMarketPrice", "currency", "financialCurrency",
+    }
     ANALYST_COMPONENTS = {
         "targets": ("get_analyst_price_targets", parse_targets),
         "recommendations": ("get_recommendations_summary", parse_recommendations),
@@ -114,23 +119,25 @@ class YahooClient:
     def __init__(self, cache: JsonCache):
         self.cache = cache
 
-    def metadata_lookup(self, symbol: str) -> dict[str, Any] | None:
-        """Return cached, identity-bearing listing metadata for symbol resolution."""
-        item, status = self.cache.get_or_fetch(
-            "symbol_identity",
+    def _provider_info(self, symbol: str, ticker: Any | None = None):
+        """Fetch the listing and analysis info superset through one cache tier."""
+        ticker = ticker or yf.Ticker(symbol)
+        return self.cache.get_or_fetch(
+            "provider_info",
             symbol,
             ANALYST_TTL_HOURS,
             lambda: {
                 key: value
-                for key, value in (call_with_retry(yf.Ticker(symbol).get_info) or {}).items()
-                if key in {
-                    "longName", "shortName", "country", "exchange",
-                    "fullExchangeName", "quoteType", "symbol",
-                }
+                for key, value in (call_with_retry(ticker.get_info) or {}).items()
+                if key in self.INFO_FIELDS
             },
             FORCE_REFRESH,
             _meaningful,
         )
+
+    def metadata_lookup(self, symbol: str) -> dict[str, Any] | None:
+        """Return cached, identity-bearing listing metadata for symbol resolution."""
+        item, status = self._provider_info(symbol)
         return item.get("data") if status != ERROR else None
 
     def _component(
@@ -204,21 +211,7 @@ class YahooClient:
         component_statuses.append(date_status)
         if dates.get("fetched_at_utc"):
             fetched_times.append(dates["fetched_at_utc"])
-        info, info_status = self.cache.get_or_fetch(
-            "analyst_info",
-            symbol,
-            ANALYST_TTL_HOURS,
-            lambda: {
-                key: value
-                for key, value in (call_with_retry(ticker.get_info) or {}).items()
-                if key in {
-                    "sector", "currentPrice", "regularMarketPrice",
-                    "currency", "financialCurrency",
-                }
-            },
-            FORCE_REFRESH,
-            _meaningful,
-        )
+        info, info_status = self._provider_info(symbol, ticker)
         info_data = info.get("data", {})
         result["sector_raw_yahoo"] = info_data.get("sector")
         result["current_price_provider"] = info_data.get(

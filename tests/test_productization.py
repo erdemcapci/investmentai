@@ -44,7 +44,7 @@ def test_cache_v2_is_rejected_and_refreshed(tmp_path):
         "estimate", "ABC", 24, lambda: {"forward_eps_growth": 0.2}
     )
     assert status == FRESH_PROVIDER
-    assert item["cache_schema_version"] == 3
+    assert item["cache_schema_version"] == 4
     assert item["data"]["forward_eps_growth"] == 0.2
 
 
@@ -151,9 +151,9 @@ def test_manifest_has_versions_coverage_and_config(tmp_path, monkeypatch):
     manifest = build_manifest(
         context, {"price_coverage_pct": 99, "universe_count": 2}, {"top_n": 10}
     )
-    assert manifest["application_version"] == "1.1.1"
-    assert manifest["scoring_model_version"] == "3.1.1"
-    assert manifest["cache_schema_version"] == 3
+    assert manifest["application_version"] == "1.1.2"
+    assert manifest["scoring_model_version"] == "3.1.2"
+    assert manifest["cache_schema_version"] == 4
     assert manifest["database_schema_version"] == 5
     assert manifest["output_schema_version"] == 1
     assert manifest["price_coverage_pct"] == 99
@@ -266,7 +266,7 @@ def test_replay_uses_stored_inputs_without_yahoo(tmp_path, monkeypatch):
         json.dumps(
             {
                 "application_version": "1.0.2",
-                "scoring_model_version": "3.1.1",
+                "scoring_model_version": "3.1.2",
                 "scoring_code_fingerprint": app.scoring_code_fingerprint(),
                 "artifact_sha256": {
                     name: hashlib.sha256((source / name).read_bytes()).hexdigest()

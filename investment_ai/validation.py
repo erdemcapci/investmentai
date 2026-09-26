@@ -9,7 +9,7 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
-from investment_ai.config import TOP_N_MIN_OUTCOME_COVERAGE_PCT
+from investment_ai.config import SCORING_MODEL_VERSION, TOP_N_MIN_OUTCOME_COVERAGE_PCT
 
 HORIZONS = {"5d": 5, "10d": 10, "20d": 20, "3m": 63, "6m": 126, "12m": 252}
 NON_OVERLAP_SPACING = {"5d": 5, "10d": 10, "20d": 20, "3m": 63, "6m": 126, "12m": 252}
@@ -90,13 +90,27 @@ def update_outcomes(
             baseline_time = pd.Timestamp(row["run_timestamp"])
             if baseline_time.tzinfo is None:
                 baseline_time = baseline_time.tz_localize("UTC")
-            mature_by_time = pd.Timestamp(now) >= baseline_time + pd.Timedelta(
-                days=int(sessions * 7 / 5) + 4
+            benchmark_baseline = pd.Timestamp(
+                row.get("benchmark_price_as_of_utc") or row["run_timestamp"]
             )
-            if not mature_by_time:
-                status, reason = "NOT_MATURE", "horizon has not elapsed"
+            if benchmark_baseline.tzinfo is None:
+                benchmark_baseline = benchmark_baseline.tz_localize("UTC")
+            if benchmark is not None:
+                benchmark_values = pd.to_numeric(benchmark, errors="coerce").dropna()
+                benchmark_values.index = pd.to_datetime(benchmark_values.index, utc=True)
+                market_mature = int((benchmark_values.index > benchmark_baseline).sum()) >= sessions
+                maturity_reason = "benchmark has insufficient completed sessions"
+            else:
+                # Conservative fallback for legacy predictions or temporary benchmark
+                # outages. It can delay attachment, but never fabricates a session.
+                market_mature = pd.Timestamp(now) >= baseline_time + pd.Timedelta(
+                    days=int(sessions * 7 / 5) + 4
+                )
+                maturity_reason = "benchmark unavailable and calendar fallback has not elapsed"
+            if not market_mature:
+                status, reason = "NOT_MATURE", maturity_reason
             elif stock is None:
-                status, reason = "DELISTED_OR_UNAVAILABLE", "no provider history"
+                status, reason = "PRICE_MISSING", "no provider history"
             else:
                 actual = realized_return(
                     stock,
@@ -170,20 +184,25 @@ def _per_run(frame: pd.DataFrame, horizon: str) -> pd.DataFrame:
                 ~selected.get("outcome_status", pd.Series(index=selected.index, dtype=object)).eq("NOT_MATURE")
             ]
             top = selected_matured[selected_matured[ret].notna()]
-            selected_count = len(selected_matured)
+            selected_count = len(selected)
+            matured_count = len(selected_matured)
             coverage = len(top) / selected_count * 100 if selected_count else 0.0
             item[f"top_{n}_selected_count"] = selected_count
+            item[f"top_{n}_matured_count"] = matured_count
             item[f"top_{n}_priced_count"] = len(top)
             item[f"top_{n}_missing_count"] = selected_count - len(top)
             item[f"top_{n}_coverage_pct"] = coverage
             item[f"top_{n}_equal_weight_return"] = (
                 top[ret].mean()
-                if len(top) and coverage >= TOP_N_MIN_OUTCOME_COVERAGE_PCT
+                if len(top)
+                and matured_count == selected_count
+                and coverage >= TOP_N_MIN_OUTCOME_COVERAGE_PCT
                 else np.nan
             )
             item[f"top_{n}_equal_weight_excess_return"] = (
                 top[excess].mean()
-                if coverage >= TOP_N_MIN_OUTCOME_COVERAGE_PCT
+                if matured_count == selected_count
+                and coverage >= TOP_N_MIN_OUTCOME_COVERAGE_PCT
                 and excess in top and top[excess].notna().any()
                 else np.nan
             )
@@ -245,10 +264,16 @@ def _aggregate(runs: pd.DataFrame, stock_observations: int) -> dict:
     return result
 
 
-def validation_report(connection: sqlite3.Connection, mode: str = "ALL_RUNS") -> dict:
+def validation_report(
+    connection: sqlite3.Connection,
+    model_version: str = SCORING_MODEL_VERSION,
+    mode: str = "ALL_RUNS",
+) -> dict:
     frame = pd.read_sql_query(
-        "SELECT p.*,o.* FROM prediction_snapshots p JOIN prediction_outcomes o USING(run_id,symbol)",
+        "SELECT p.*,o.* FROM prediction_snapshots p JOIN prediction_outcomes o "
+        "USING(run_id,symbol) WHERE p.model_version=?",
         connection,
+        params=(model_version,),
     )
     frame = frame.loc[:, ~frame.columns.duplicated()]
     output = {}
@@ -299,6 +324,7 @@ def validation_report(connection: sqlite3.Connection, mode: str = "ALL_RUNS") ->
         summary.update(
             {
                 "mode": mode,
+                "model_version": model_version,
                 "eligible_predictions": total,
                 "total_predictions": total,
                 "not_mature_predictions": not_mature,

@@ -7,9 +7,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from investment_ai.config import CACHE_SCHEMA_VERSION
 from investment_ai.status import ERROR, FRESH_CACHE, FRESH_PROVIDER, STALE_FALLBACK
-
-CURRENT_CACHE_SCHEMA_VERSION = 3
 
 
 class JsonCache:
@@ -58,7 +57,7 @@ class JsonCache:
         old = self.read(tier, symbol)
         old_valid = bool(
             old
-            and old.get("cache_schema_version") == CURRENT_CACHE_SCHEMA_VERSION
+            and old.get("cache_schema_version") == CACHE_SCHEMA_VERSION
             and isinstance(old.get("data"), dict)
             and (validator is None or validator(old.get("data", {})))
         )
@@ -76,7 +75,7 @@ class JsonCache:
             if not valid:
                 raise ValueError("provider response failed validation")
             item = {
-                "cache_schema_version": CURRENT_CACHE_SCHEMA_VERSION,
+                "cache_schema_version": CACHE_SCHEMA_VERSION,
                 "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
                 "data": data,
             }
@@ -96,4 +95,4 @@ class JsonCache:
                     extra={"symbol": symbol, "component": tier},
                 )
                 return old, STALE_FALLBACK
-            return {"cache_schema_version": CURRENT_CACHE_SCHEMA_VERSION, "fetched_at_utc": None, "data": {}, "error": str(exc)}, ERROR
+            return {"cache_schema_version": CACHE_SCHEMA_VERSION, "fetched_at_utc": None, "data": {}, "error": str(exc)}, ERROR
