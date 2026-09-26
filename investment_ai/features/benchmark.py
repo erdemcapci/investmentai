@@ -44,9 +44,10 @@ def assign_benchmark(index_name: object) -> tuple[str, str, str]:
 def add_benchmark_relative_strength(frame: pd.DataFrame, minimum_peers: int = 15) -> pd.DataFrame:
     result = frame.copy()
     assigned = result.get("index_name", pd.Series("", index=result.index)).map(assign_benchmark)
-    result[["benchmark_symbol", "benchmark_name", "benchmark_method"]] = pd.DataFrame(
+    result[["benchmark_symbol", "benchmark_name", "benchmark_assignment_method"]] = pd.DataFrame(
         assigned.tolist(), index=result.index
     )
+    result["benchmark_return_basis"] = "ADJUSTED_CLOSE_RETURN"
     for horizon in (20, 60, 126, 252):
         stock = pd.to_numeric(result.get(f"return_{horizon}d_pct"), errors="coerce")
         benchmark = pd.to_numeric(result.get(f"benchmark_return_{horizon}d_pct"), errors="coerce")

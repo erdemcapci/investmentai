@@ -198,6 +198,15 @@ def test_benchmark_assignment_excess_return_and_regions():
     result = add_benchmark_relative_strength(frame, minimum_peers=2)
     assert result.excess_return_20d_pct.tolist() == [2, 4]
     assert result.benchmark_symbol.tolist() == ["^GSPC", "^STOXX"]
+    assert result.benchmark_assignment_method.tolist() == [
+        "Yahoo direct index",
+        "Yahoo direct index",
+    ]
+    assert result.benchmark_return_basis.tolist() == [
+        "ADJUSTED_CLOSE_RETURN",
+        "ADJUSTED_CLOSE_RETURN",
+    ]
+    assert "benchmark_method" not in result
 
 
 def test_forward_return_uses_trading_sessions_and_maturity_guards():
