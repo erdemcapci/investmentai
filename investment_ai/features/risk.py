@@ -2,7 +2,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-from investment_ai.scoring.common import INSUFFICIENT_DATA, RANKED, curve, weighted, safe_nanmean
+from investment_ai.scoring.common import (
+    INSUFFICIENT_DATA,
+    RANKED,
+    curve,
+    weighted,
+    safe_nanmean,
+)
 from investment_ai.status import (
     ERROR,
     FRESH,
@@ -23,18 +29,32 @@ COMPONENT_STATUS_MULTIPLIERS = {
     INSUFFICIENT: 0.00,
 }
 ANALYST_COMPONENTS = (
-    "targets", "recommendations", "eps_trend", "eps_revisions",
-    "revenue_estimate", "earnings_estimate", "rating_actions",
-    "earnings_history", "earnings_dates",
+    "targets",
+    "recommendations",
+    "eps_trend",
+    "eps_revisions",
+    "revenue_estimate",
+    "earnings_estimate",
+    "rating_actions",
+    "earnings_history",
+    "earnings_dates",
 )
 
 
 def market_price_risk_score(row: dict) -> float:
-    return safe_nanmean([
-        curve(row.get("volatility_60d"), [(10, 10), (30, 45), (60, 85), (100, 100)]),
-        curve(row.get("downside_volatility"), [(8, 10), (25, 45), (55, 90), (90, 100)]),
-        curve(abs(row.get("max_drawdown_1y", np.nan)), [(5, 10), (20, 45), (50, 100)]),
-    ])
+    return safe_nanmean(
+        [
+            curve(
+                row.get("volatility_60d"), [(10, 10), (30, 45), (60, 85), (100, 100)]
+            ),
+            curve(
+                row.get("downside_volatility"), [(8, 10), (25, 45), (55, 90), (90, 100)]
+            ),
+            curve(
+                abs(row.get("max_drawdown_1y", np.nan)), [(5, 10), (20, 45), (50, 100)]
+            ),
+        ]
+    )
 
 
 def _age_hours(value):
@@ -63,7 +83,9 @@ def risk_and_confidence(row: dict) -> dict:
             ]
         )
         net_debt = pd.to_numeric(row.get("net_debt"), errors="coerce")
-        net_cash = bool(row.get("net_cash_flag")) or (pd.notna(net_debt) and net_debt <= 0)
+        net_cash = bool(row.get("net_cash_flag")) or (
+            pd.notna(net_debt) and net_debt <= 0
+        )
         if row.get("negative_equity_flag"):
             balance = 100.0
             balance_reason = "NEGATIVE_EQUITY"
@@ -72,7 +94,11 @@ def risk_and_confidence(row: dict) -> dict:
             balance_reason = "NEGATIVE_EBITDA_WITH_POSITIVE_NET_DEBT"
         elif row.get("negative_ebitda_flag") and net_cash:
             balance_reason = "NEGATIVE_EBITDA_WITH_NET_CASH_METRIC_BASED"
-        elif row.get("negative_operating_profit_flag") and pd.notna(net_debt) and net_debt > 0:
+        elif (
+            row.get("negative_operating_profit_flag")
+            and pd.notna(net_debt)
+            and net_debt > 0
+        ):
             balance = max(balance, 90.0) if pd.notna(balance) else 90.0
             balance_reason = "NEGATIVE_OPERATING_PROFIT_WITH_POSITIVE_NET_DEBT"
         elif row.get("negative_operating_profit_flag"):
@@ -118,15 +144,28 @@ def risk_and_confidence(row: dict) -> dict:
         tier: _age_hours(row.get(f"{tier}_fetched_at_utc"))
         for tier in ("analyst", "valuation", "fundamentals")
     }
-    status_values = [row.get(f"{name}_cache_status", INSUFFICIENT) for name in ANALYST_COMPONENTS]
+    status_values = [
+        row.get(f"{name}_cache_status", INSUFFICIENT) for name in ANALYST_COMPONENTS
+    ]
     system_statuses = status_values + [
         row.get("valuation_cache_status", INSUFFICIENT),
         row.get("fundamental_cache_status", INSUFFICIENT),
         row.get("price_data_status", INSUFFICIENT),
     ]
-    status_scores = [COMPONENT_STATUS_MULTIPLIERS.get(value, 0.0) for value in system_statuses]
+    status_scores = [
+        COMPONENT_STATUS_MULTIPLIERS.get(value, 0.0) for value in system_statuses
+    ]
     freshness = safe_nanmean(status_scores) * 100
-    analyst_status_scores = [COMPONENT_STATUS_MULTIPLIERS.get(value, 0.0) for value in status_values]
+    # Completeness is presence/usable-state only; it deliberately ignores age.
+    provider_completeness = safe_nanmean(
+        [
+            100.0 if value not in {ERROR, INSUFFICIENT, None} else 0.0
+            for value in system_statuses
+        ]
+    )
+    analyst_status_scores = [
+        COMPONENT_STATUS_MULTIPLIERS.get(value, 0.0) for value in status_values
+    ]
     analyst_fresh_count = sum(score >= 0.95 for score in analyst_status_scores)
     analyst_stale_count = sum(0 < score < 0.95 for score in analyst_status_scores)
     analyst_error_count = sum(status == ERROR for status in status_values)
@@ -146,9 +185,9 @@ def risk_and_confidence(row: dict) -> dict:
             "coverage": coverage,
             "analyst": analyst,
             "freshness": freshness,
-            "provider": freshness,
+            "provider": provider_completeness,
         },
-        {"coverage": 0.45, "analyst": 0.20, "freshness": 0.20, "provider": 0.15},
+        {"coverage": 0.40, "analyst": 0.20, "freshness": 0.20, "provider": 0.20},
         0,
     )
     # Reliable CET1/NPL/NIM/regulatory-capital inputs are unavailable; do not
@@ -169,6 +208,8 @@ def risk_and_confidence(row: dict) -> dict:
         "valuation_freshness_age_hours": ages["valuation"],
         "fundamental_freshness_age_hours": ages["fundamentals"],
         "analyst_component_freshness_score": safe_nanmean(analyst_status_scores) * 100,
+        "freshness_score": freshness,
+        "provider_completeness_score": provider_completeness,
         "analyst_component_fresh_count": analyst_fresh_count,
         "analyst_component_stale_count": analyst_stale_count,
         "analyst_component_error_count": analyst_error_count,

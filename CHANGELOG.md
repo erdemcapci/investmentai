@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.0 — data integrity and validation correctness
+
+- Added durable security mappings, stable identities, explicit heuristic/unresolved states,
+  constituent telemetry policy, local daily-price storage, anomaly flags, and outcome states.
+- Made historical outcome fetches independent of current membership and added query indexes.
+- Rebuilt validation around per-run cross-sectional Top-N portfolios and Spearman IC, with
+  run-level aggregation, overlap modes, and explicit censoring coverage.
+- Added exact timestamp history, independent non-null rank history, currency-safe FCF yield,
+  canonical sector precedence, growth fallback, separate freshness/completeness confidence,
+  PARTIAL status, scoring parameter snapshots, and replay output verification.
+- Application 1.1.0, scoring model 3.1.1 unchanged, database schema 5, output schema 1.
+
 ## v1.0.2 — runtime hardening
 
 - Upgraded the GitHub-maintained checkout and Python setup actions to their Node 24

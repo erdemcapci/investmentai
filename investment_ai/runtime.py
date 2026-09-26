@@ -19,18 +19,28 @@ import pandas as pd
 import numpy as np
 
 from investment_ai.config import (
-    APPLICATION_VERSION, CACHE_SCHEMA_VERSION, DATABASE_SCHEMA_VERSION,
+    APPLICATION_VERSION,
+    CACHE_SCHEMA_VERSION,
+    DATABASE_SCHEMA_VERSION,
     SCORING_MODEL_VERSION,
+    OUTPUT_SCHEMA_VERSION,
+    MIN_PEERS,
 )
 
 ERROR_COLUMNS = [
-    "symbol", "stage", "component", "error_type", "error_message",
-    "retry_count", "used_stale_fallback", "timestamp_utc", "attempt_number",
+    "symbol",
+    "stage",
+    "component",
+    "error_type",
+    "error_message",
+    "retry_count",
+    "used_stale_fallback",
+    "timestamp_utc",
+    "attempt_number",
 ]
 
 
 SCORING_CODE_PATHS = (
-    "investment_ai/config.py",
     "investment_ai/pipeline.py",
     "investment_ai/scoring/common.py",
     "investment_ai/scoring/long_term.py",
@@ -79,6 +89,27 @@ def scoring_code_fingerprint(root: Path | None = None) -> str:
     return digest.hexdigest()
 
 
+analysis_code_fingerprint = scoring_code_fingerprint
+
+
+def scoring_parameter_snapshot() -> dict[str, Any]:
+    """Normalized runtime parameters that can alter scores or ranks."""
+    from investment_ai.pipeline import LT_DRIVER_SPECS, ST_DRIVER_SPECS
+
+    return {
+        "minimum_peers": MIN_PEERS,
+        "lt_weights": {item[2]: item[3] for item in LT_DRIVER_SPECS},
+        "st_weights": {item[2]: item[3] for item in ST_DRIVER_SPECS},
+        "peer_fallback_order": ["region_sector", "region", "global_sector", "global"],
+        "setup_thresholds": {"credible_setup_required": True},
+        "coverage_thresholds": {
+            "common_price": [97, 90],
+            "lt_component": [70, 55],
+            "st_component": [75, 60],
+        },
+    }
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -98,7 +129,9 @@ def atomic_csv(frame: pd.DataFrame, path: Path) -> None:
     os.replace(temporary, path)
 
 
-def run_status(metrics: dict[str, Any], universe_valid: bool = True) -> tuple[str, list[str]]:
+def run_status(
+    metrics: dict[str, Any], universe_valid: bool = True
+) -> tuple[str, list[str]]:
     required = {
         "price_coverage_pct": (97, 90),
         "quality_coverage_pct": (70, 55),
@@ -122,44 +155,80 @@ def run_status(metrics: dict[str, Any], universe_valid: bool = True) -> tuple[st
     return ("DEGRADED", degraded) if degraded else ("VALID", [])
 
 
-def horizon_run_statuses(metrics: dict[str, Any], universe_valid: bool = True) -> dict[str, Any]:
+def horizon_run_statuses(
+    metrics: dict[str, Any], universe_valid: bool = True
+) -> dict[str, Any]:
     """Evaluate shared, long-term and short-term input readiness independently."""
+
     def evaluate(spec: dict[str, tuple[float, float]]) -> tuple[str, list[str]]:
-        invalid = [f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {floor}%"
-                   for k, (_, floor) in spec.items() if float(metrics.get(k, 0) or 0) < floor]
+        invalid = [
+            f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {floor}%"
+            for k, (_, floor) in spec.items()
+            if float(metrics.get(k, 0) or 0) < floor
+        ]
         if invalid:
             return "INVALID", invalid
-        degraded = [f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {target}%"
-                    for k, (target, _) in spec.items() if float(metrics.get(k, 0) or 0) < target]
+        degraded = [
+            f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {target}%"
+            for k, (target, _) in spec.items()
+            if float(metrics.get(k, 0) or 0) < target
+        ]
         return ("DEGRADED", degraded) if degraded else ("VALID", [])
 
-    common = ("INVALID", ["combined universe validation failed"]) if not universe_valid else evaluate({
-        "price_coverage_pct": (97, 90),
-    })
-    lt = evaluate({
-        "quality_coverage_pct": (70, 55), "growth_coverage_pct": (70, 55),
-        "valuation_coverage_pct": (70, 55), "long_expectations_coverage_pct": (75, 60),
-        "lt_score_coverage_pct": (75, 60),
-    })
-    st = evaluate({
-        "price_coverage_pct": (97, 90), "short_expectations_coverage_pct": (75, 60),
-        "short_rs_coverage_pct": (75, 60), "setup_data_coverage_pct": (75, 60),
-        "technical_data_coverage_pct": (75, 60),
-    })
+    common = (
+        ("INVALID", ["combined universe validation failed"])
+        if not universe_valid
+        else evaluate(
+            {
+                "price_coverage_pct": (97, 90),
+            }
+        )
+    )
+    lt = evaluate(
+        {
+            "quality_coverage_pct": (70, 55),
+            "growth_coverage_pct": (70, 55),
+            "valuation_coverage_pct": (70, 55),
+            "long_expectations_coverage_pct": (75, 60),
+            "lt_score_coverage_pct": (75, 60),
+        }
+    )
+    st = evaluate(
+        {
+            "price_coverage_pct": (97, 90),
+            "short_expectations_coverage_pct": (75, 60),
+            "short_rs_coverage_pct": (75, 60),
+            "setup_data_coverage_pct": (75, 60),
+            "technical_data_coverage_pct": (75, 60),
+        }
+    )
     if common[0] == "INVALID":
         lt = st = ("INVALID", common[1])
-    order = {"VALID": 0, "DEGRADED": 1, "INVALID": 2}
-    overall = max((common[0], lt[0], st[0]), key=order.get)
-    return {"common_run_status": common[0], "lt_run_status": lt[0],
-            "st_run_status": st[0], "overall_run_status": overall,
-            "common_run_status_reasons": common[1], "lt_run_status_reasons": lt[1],
-            "st_run_status_reasons": st[1]}
+    if common[0] == "INVALID" or (lt[0] == "INVALID" and st[0] == "INVALID"):
+        overall = "INVALID"
+    elif (lt[0] == "INVALID") != (st[0] == "INVALID"):
+        overall = "PARTIAL"
+    elif "DEGRADED" in (common[0], lt[0], st[0]):
+        overall = "DEGRADED"
+    else:
+        overall = "VALID"
+    return {
+        "common_run_status": common[0],
+        "lt_run_status": lt[0],
+        "st_run_status": st[0],
+        "overall_run_status": overall,
+        "common_run_status_reasons": common[1],
+        "lt_run_status_reasons": lt[1],
+        "st_run_status_reasons": st[1],
+    }
 
 
 def _git_metadata() -> tuple[str | None, bool | None]:
     try:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-        dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip())
+        dirty = bool(
+            subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()
+        )
         return sha, dirty
     except (OSError, subprocess.SubprocessError):
         return None, None
@@ -187,12 +256,18 @@ class RunContext:
     run_id: str
     directory: Path
     started: datetime
-    checkpoint: dict[str, Any] = field(default_factory=lambda: {
-        "universe_loaded": False, "prices_complete": False,
-        "provider_symbols_complete": [], "provider_symbols_usable": [],
-        "provider_symbols_failed": [],
-        "analysis_complete": False, "history_saved": False, "exports_complete": False,
-    })
+    checkpoint: dict[str, Any] = field(
+        default_factory=lambda: {
+            "universe_loaded": False,
+            "prices_complete": False,
+            "provider_symbols_complete": [],
+            "provider_symbols_usable": [],
+            "provider_symbols_failed": [],
+            "analysis_complete": False,
+            "history_saved": False,
+            "exports_complete": False,
+        }
+    )
     errors: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -202,7 +277,9 @@ class RunContext:
 
     def freeze_analysis_as_of(self, when: datetime | None = None) -> datetime:
         if not self.checkpoint.get("analysis_as_of_utc"):
-            self.checkpoint["analysis_as_of_utc"] = (when or datetime.now(timezone.utc)).isoformat()
+            self.checkpoint["analysis_as_of_utc"] = (
+                when or datetime.now(timezone.utc)
+            ).isoformat()
             self.save_checkpoint()
         return datetime.fromisoformat(self.checkpoint["analysis_as_of_utc"])
 
@@ -211,58 +288,98 @@ class RunContext:
         directory = runs_dir / run_id
         directory.mkdir(parents=True, exist_ok=True)
         checkpoint_path = directory / "checkpoint.json"
-        checkpoint = json.loads(checkpoint_path.read_text()) if resume and checkpoint_path.exists() else None
+        checkpoint = (
+            json.loads(checkpoint_path.read_text())
+            if resume and checkpoint_path.exists()
+            else None
+        )
         now = datetime.now(timezone.utc)
         context = cls(run_id, directory, now)
         if checkpoint:
             if checkpoint.get("run_id") != run_id:
                 raise RuntimeError("Checkpoint run_id does not match run directory")
             if checkpoint.get("scoring_model_version") != SCORING_MODEL_VERSION:
-                raise RuntimeError("Cannot resume checkpoint under a different scoring model")
+                raise RuntimeError(
+                    "Cannot resume checkpoint under a different scoring model"
+                )
             if checkpoint.get("application_version") != APPLICATION_VERSION:
-                raise RuntimeError("Cannot resume checkpoint under a different application version")
+                raise RuntimeError(
+                    "Cannot resume checkpoint under a different application version"
+                )
             context.checkpoint.update(checkpoint)
             context.checkpoint["resumed"] = True
             context.started = datetime.fromisoformat(checkpoint["run_started_at_utc"])
             errors_path = directory / "errors.csv"
             if errors_path.exists():
-                context.errors = pd.read_csv(errors_path).where(pd.notna, None).to_dict("records")
+                context.errors = (
+                    pd.read_csv(errors_path).where(pd.notna, None).to_dict("records")
+                )
         else:
-            context.checkpoint.update({
-                "run_id": run_id, "run_started_at_utc": now.isoformat(),
-                "analysis_as_of_utc": None, "run_finished_at_utc": None,
-                "application_version": APPLICATION_VERSION,
-                "scoring_model_version": SCORING_MODEL_VERSION,
-                "cache_schema_version": CACHE_SCHEMA_VERSION,
-                "database_schema_version": DATABASE_SCHEMA_VERSION,
-                "provider_capture_complete": False, "outcomes_updated": False,
-                "manifest_complete": False,
-            })
+            context.checkpoint.update(
+                {
+                    "run_id": run_id,
+                    "run_started_at_utc": now.isoformat(),
+                    "analysis_as_of_utc": None,
+                    "run_finished_at_utc": None,
+                    "application_version": APPLICATION_VERSION,
+                    "scoring_model_version": SCORING_MODEL_VERSION,
+                    "cache_schema_version": CACHE_SCHEMA_VERSION,
+                    "database_schema_version": DATABASE_SCHEMA_VERSION,
+                    "provider_capture_complete": False,
+                    "outcomes_updated": False,
+                    "manifest_complete": False,
+                }
+            )
             context.save_checkpoint()
         return context
 
     def save_checkpoint(self) -> None:
         atomic_json(self.directory / "checkpoint.json", self.checkpoint)
 
-    def record_error(self, symbol: str, stage: str, component: str, error: Any,
-                     retry_count: int | None = None, stale: bool = False,
-                     error_type: str | None = None) -> None:
-        self.errors.append({
-            "symbol": symbol, "stage": stage, "component": component,
-            "error_type": error_type or type(error).__name__, "error_message": str(error)[:1000],
-            "retry_count": retry_count, "used_stale_fallback": stale,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "attempt_number": 1 + int(bool(self.checkpoint.get("resumed"))),
-        })
+    def record_error(
+        self,
+        symbol: str,
+        stage: str,
+        component: str,
+        error: Any,
+        retry_count: int | None = None,
+        stale: bool = False,
+        error_type: str | None = None,
+    ) -> None:
+        self.errors.append(
+            {
+                "symbol": symbol,
+                "stage": stage,
+                "component": component,
+                "error_type": error_type or type(error).__name__,
+                "error_message": str(error)[:1000],
+                "retry_count": retry_count,
+                "used_stale_fallback": stale,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "attempt_number": 1 + int(bool(self.checkpoint.get("resumed"))),
+            }
+        )
 
     def save_errors(self) -> None:
         frame = pd.DataFrame(self.errors, columns=ERROR_COLUMNS)
-        atomic_csv(frame.drop_duplicates(subset=["symbol", "stage", "component", "error_type",
-                                                 "error_message", "attempt_number"]),
-                   self.directory / "errors.csv")
+        atomic_csv(
+            frame.drop_duplicates(
+                subset=[
+                    "symbol",
+                    "stage",
+                    "component",
+                    "error_type",
+                    "error_message",
+                    "attempt_number",
+                ]
+            ),
+            self.directory / "errors.csv",
+        )
 
 
-def build_manifest(context: RunContext, metrics: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def build_manifest(
+    context: RunContext, metrics: dict[str, Any], config: dict[str, Any]
+) -> dict[str, Any]:
     finished = datetime.now(timezone.utc)
     # Persist the incomplete state first so a failed atomic manifest replacement is resumable.
     context.checkpoint["manifest_complete"] = False
@@ -282,10 +399,15 @@ def build_manifest(context: RunContext, metrics: dict[str, Any], config: dict[st
         "duration_seconds": round((finished - context.started).total_seconds(), 3),
         "application_version": APPLICATION_VERSION,
         "scoring_model_version": SCORING_MODEL_VERSION,
-        "scoring_code_fingerprint": scoring_code_fingerprint(),
+        "analysis_code_fingerprint": analysis_code_fingerprint(),
+        "scoring_code_fingerprint": analysis_code_fingerprint(),  # v1.0 reader compatibility
+        "scoring_parameter_snapshot": scoring_parameter_snapshot(),
         "analysis_as_of_utc": context.checkpoint.get("analysis_as_of_utc"),
         "cache_schema_version": CACHE_SCHEMA_VERSION,
         "database_schema_version": DATABASE_SCHEMA_VERSION,
+        "output_schema_version": OUTPUT_SCHEMA_VERSION,
+        "technical_price_basis": "AUTO_ADJUSTED",
+        "validation_return_basis": "PRICE_RETURN",
         "git_commit_sha": sha,
         "git_dirty_flag": dirty,
         "python_version": sys.version.split()[0],
@@ -296,7 +418,12 @@ def build_manifest(context: RunContext, metrics: dict[str, Any], config: dict[st
     }
     manifest["artifact_sha256"] = {
         name: hashlib.sha256((context.directory / name).read_bytes()).hexdigest()
-        for name in ("universe.csv", "price_features.csv", "normalized_provider.csv", "full_analysis.csv")
+        for name in (
+            "universe.csv",
+            "price_features.csv",
+            "normalized_provider.csv",
+            "full_analysis.csv",
+        )
         if (context.directory / name).exists()
     }
     atomic_json(context.directory / "run_manifest.json", manifest)
