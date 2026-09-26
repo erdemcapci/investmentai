@@ -53,14 +53,34 @@ def download_prices(symbols: list[str], period="2y") -> pd.DataFrame:
 
 
 def download_prices_range(symbols: list[str], start, end) -> pd.DataFrame:
-    """Download one shared date window in bounded batches."""
+    """Download a shared window and retry symbols silently omitted by Yahoo."""
     chunks = [
         _download_chunk(symbols[i : i + PRICE_BATCH_SIZE], start=start, end=end)
         for i in range(0, len(symbols), PRICE_BATCH_SIZE)
     ]
     successful = [chunk for chunk in chunks if not chunk.empty]
     combined = pd.concat(successful, axis=1) if successful else pd.DataFrame()
+    present = (
+        set(combined.columns.get_level_values(0))
+        if isinstance(combined.columns, pd.MultiIndex)
+        else set()
+    )
+    missing = [symbol for symbol in symbols if symbol not in present]
+    retries = [
+        _download_chunk(missing[i : i + 25], start=start, end=end)
+        for i in range(0, len(missing), 25)
+    ]
+    successful_retries = [chunk for chunk in retries if not chunk.empty]
+    if successful_retries:
+        combined = pd.concat([combined, *successful_retries], axis=1)
+        combined = combined.loc[:, ~combined.columns.duplicated(keep="last")]
+    present_after_retry = (
+        set(combined.columns.get_level_values(0))
+        if isinstance(combined.columns, pd.MultiIndex)
+        else set()
+    )
     combined.attrs["requested_symbol_count"] = len(symbols)
+    combined.attrs["missing_after_retry_count"] = len(set(symbols) - present_after_retry)
     return combined
 
 

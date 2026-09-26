@@ -1,4 +1,4 @@
-# Investment AI 1.1
+# Investment AI 1.1.2
 
 Investment AI is a deterministic, auditable research system that ranks the combined
 S&P 500 and STOXX Europe 600 universe. It produces separate long-term investment and
@@ -24,6 +24,11 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+A normal repeat run automatically refreshes constituents lightly, extends the local price
+store with a small revision overlap and missing sessions, and reuses fresh analyst (~18h),
+valuation (~24h), and fundamentals (~7d) caches. The user does not select components to
+skip: scores and ranks are recomputed from the latest canonical inputs on every run.
+
 The command fetches the two universes, daily prices, and normalized Yahoo provider
 inputs; calculates rankings; stores prediction history; evaluates run health; and
 writes critical audit artifacts unconditionally under `investment_ai_runs/<run_id>/`.
@@ -43,9 +48,10 @@ breaking changes are recorded in the changelog.
 
 ## Long-term methodology
 
-The v3.1.1 score combines Quality (25%), Growth (20%), peer Valuation (20%), Long-Term
+The v3.1.2 score combines Quality (25%), Growth (20%), peer Valuation (20%), Long-Term
 Expectations (20%), Long Trend (10%), and Financial Safety (5%). Core pillars must be
 present. Raw relative strength remains the production trend signal in v1.0.
+Model 3.1.2 retains the published 3.1.1 formulas and weights while correcting canonical-sector applicability and currency-safe FCF inputs.
 
 ## Short-term methodology
 
@@ -69,7 +75,7 @@ timings, cache ratios, score distributions, and benchmark health.
 
 ## Cache and history
 
-Cache schema 3 invalidates all older parsed objects through normal schema validation.
+Cache schema 4 invalidates all older parsed objects through normal schema validation.
 SQLite schema 5 uses WAL, a busy timeout, explicit metadata versioning, normalized
 `analyst_observations`, idempotent ranking history, immutable `prediction_snapshots`,
 and attach-only `prediction_outcomes`. The wide `analyst_snapshots` table is retained
@@ -100,7 +106,7 @@ Europe 600). Dual membership is resolved deterministically by the same stable le
 tie rule used by peers. Excess return is `stock return - assigned benchmark return` at
 20/60/126/252 sessions, then percentiled by sufficiently populated sector, assigned
 benchmark, or the full universe. Raw and excess features are both retained. Benchmark
-RS is **experimental and not used in v3.1.1 scoring**; missing benchmark data is marked
+RS is **experimental and not used in v3.1.2 scoring**; missing benchmark data is marked
 `FALLBACK_RAW`, never fabricated. The direct tickers could not be live-verified in the
 restricted build environment, so operational benchmark health is explicit.
 

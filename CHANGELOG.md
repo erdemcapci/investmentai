@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.2
+
+- Froze the 3.1.2 scoring implementation with unchanged published weights and
+  corrected canonical-sector and currency-safe FCF inputs.
+- Invalidated pre-1.1.2 provider caches with cache schema 4, unified Yahoo
+  listing metadata, isolated validation by model version, retried omitted
+  incremental price symbols, and made outcome maturity session-aware.
+
 ## 1.1.1
 
 - Completed the final v1.1 integration of authoritative STOXX resolution,

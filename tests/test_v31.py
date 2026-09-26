@@ -3,7 +3,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
-from investment_ai.data.cache import CURRENT_CACHE_SCHEMA_VERSION, JsonCache
+from investment_ai.config import CACHE_SCHEMA_VERSION
+from investment_ai.data.cache import JsonCache
 from investment_ai.data.history_store import HistoryStore
 from investment_ai.features.analyst import expectations_score, parse_estimates
 from investment_ai.features.fundamentals import derive_fundamentals
@@ -34,7 +35,7 @@ def test_cache_schema_and_semantics_gate_fallback(tmp_path):
     def valid(data):
         return pd.notna(data.get("value"))
     item, status = cache.get_or_fetch("x", "A", 10, lambda: {"value": 2}, validator=valid)
-    assert status == FRESH_PROVIDER and item["cache_schema_version"] == CURRENT_CACHE_SCHEMA_VERSION
+    assert status == FRESH_PROVIDER and item["cache_schema_version"] == CACHE_SCHEMA_VERSION
     assert cache.get_or_fetch("x", "A", 10, lambda: {}, validator=valid)[1] == FRESH_CACHE
     path = cache._path("x", "A")
     path.write_text('{"cache_schema_version":2,"fetched_at_utc":"2026-09-25T00:00:00+00:00","data":{"value":null}}')
@@ -45,7 +46,7 @@ def test_valid_stale_cache_is_only_allowed_fallback(tmp_path):
     cache = JsonCache(tmp_path)
     old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     cache._path("x", "A").write_text(
-        f'{{"cache_schema_version":3,"fetched_at_utc":"{old}","data":{{"value":1}}}}'
+        f'{{"cache_schema_version":4,"fetched_at_utc":"{old}","data":{{"value":1}}}}'
     )
     _, status = cache.get_or_fetch("x", "A", 1, lambda: (_ for _ in ()).throw(RuntimeError()), validator=lambda d: d.get("value") == 1)
     assert status == STALE_FALLBACK
