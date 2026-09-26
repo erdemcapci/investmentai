@@ -204,6 +204,11 @@ def derive_fundamentals(
         "negative_equity_flag": bool(negative_equity),
         "negative_ebitda_flag": bool(negative_ebitda),
         "negative_operating_profit_flag": bool(negative_operating_profit),
+        "net_cash_flag": bool(
+            pd.notna(current["total_debt"])
+            and pd.notna(current["cash"])
+            and current["total_debt"] - current["cash"] <= 0
+        ),
         "financial_diagnostics": "|".join(
             name for flag, name in (
                 (negative_equity, "NEGATIVE_EQUITY"),

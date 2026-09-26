@@ -3,6 +3,8 @@ from typing import Any
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
+from investment_ai.config import MIN_PEERS
+from investment_ai.features.peers import resolve_metric_peers
 from investment_ai.scoring.common import curve, weighted, percentile, safe_nanmean
 
 
@@ -73,37 +75,37 @@ def price_features(history: pd.DataFrame, now: datetime | None = None) -> dict[s
     )
     out["average_volume_20d"] = vol.tail(20).mean()
     out["average_volume_60d"] = vol.tail(60).mean()
+    # The signal window never appears in its own comparison baseline.
     out["relative_volume_1d"] = (
-        vol.iloc[-1] / vol.tail(20).mean() if len(vol) >= 20 else np.nan
+        vol.iloc[-1] / vol.iloc[-21:-1].mean() if len(vol) >= 21 else np.nan
     )
     out["relative_volume_5d"] = (
-        vol.tail(5).mean() / vol.tail(60).mean() if len(vol) >= 60 else np.nan
+        vol.iloc[-5:].mean() / vol.iloc[-60:-5].mean() if len(vol) >= 60 else np.nan
     )
     out["average_dollar_volume_20d"] = out["average_volume_20d"] * close.tail(20).mean()
     return out
 
 
-def add_relative_strength(frame: pd.DataFrame, minimum_peers: int = 15) -> pd.DataFrame:
+def add_relative_strength(frame: pd.DataFrame, minimum_peers: int = MIN_PEERS) -> pd.DataFrame:
     result = frame.copy()
     for n in (20, 60, 126, 252):
         result[f"rs_{n}d_percentile"] = np.nan
-    sector = result.get("sector_normalized", result.get("sector", pd.Series("", index=result.index))).fillna("")
-    for _, idx in result.groupby(sector).groups.items():
-        for n in (20, 60, 126, 252):
-            metric = f"return_{n}d_pct"
-            sector_valid = pd.to_numeric(result.loc[idx, metric], errors="coerce").dropna()
-            membership = sorted(str(result.loc[idx[0], "index_name"]).split("|"))[0].strip() if "index_name" in result and len(idx) else ""
-            memberships = result.get("index_name", pd.Series("", index=result.index)).fillna("").astype(str)
-            index_idx = result.index[memberships.map(lambda value: membership in [x.strip() for x in value.split("|")])]
-            index_valid = pd.to_numeric(result.loc[index_idx, metric], errors="coerce").dropna()
-            universe_valid = pd.to_numeric(result[metric], errors="coerce").dropna()
-            peers = sector_valid.index if len(sector_valid) >= minimum_peers else index_valid.index if len(index_valid) >= minimum_peers else universe_valid.index
-            method = "sector" if len(sector_valid) >= minimum_peers else "index" if len(index_valid) >= minimum_peers else "universe"
-            result.loc[idx, f"rs_{n}d_peer_method"] = method
-            result.loc[idx, f"rs_{n}d_peer_count"] = len(peers)
-            result.loc[idx, f"rs_{n}d_percentile"] = percentile(
-                result.loc[peers, f"return_{n}d_pct"]
-            ).reindex(idx)
+        result[f"rs_{n}d_peer_method"] = "universe"
+        result[f"rs_{n}d_peer_count"] = 0
+        result[f"rs_{n}d_peer_index"] = ""
+        metric = f"return_{n}d_pct"
+        if metric not in result:
+            continue
+        for row_index in result.index:
+            peers, method, peer_index = resolve_metric_peers(
+                result, row_index, metric, minimum_peers
+            )
+            ranks = percentile(result.loc[peers, metric])
+            result.at[row_index, f"rs_{n}d_peer_method"] = method
+            result.at[row_index, f"rs_{n}d_peer_count"] = len(peers)
+            result.at[row_index, f"rs_{n}d_peer_index"] = peer_index
+            if row_index in ranks.index:
+                result.at[row_index, f"rs_{n}d_percentile"] = ranks.loc[row_index]
     return result
 
 

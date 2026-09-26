@@ -31,7 +31,8 @@ def test_component_history_uses_exact_timestamp_and_never_stale(tmp_path):
 
 def test_cache_schema_and_semantics_gate_fallback(tmp_path):
     cache = JsonCache(tmp_path)
-    valid = lambda data: pd.notna(data.get("value"))
+    def valid(data):
+        return pd.notna(data.get("value"))
     item, status = cache.get_or_fetch("x", "A", 10, lambda: {"value": 2}, validator=valid)
     assert status == FRESH_PROVIDER and item["cache_schema_version"] == CURRENT_CACHE_SCHEMA_VERSION
     assert cache.get_or_fetch("x", "A", 10, lambda: {}, validator=valid)[1] == FRESH_CACHE

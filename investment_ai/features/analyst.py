@@ -156,7 +156,10 @@ def parse_estimates(value: Any, kind: str) -> dict[str, Any]:
         )
     plus_1y = number(output.get(f"{kind}_plus_1y_growth"))
     current_year = number(output.get(f"{kind}_0y_growth"))
-    output[f"forward_{kind}_growth"] = plus_1y if pd.notna(plus_1y) else current_year
+    growth = plus_1y if pd.notna(plus_1y) else current_year
+    suspicious_scale = pd.notna(growth) and abs(growth) > 5
+    output[f"forward_{kind}_growth"] = np.nan if suspicious_scale else growth
+    output[f"forward_{kind}_growth_scale_warning"] = bool(suspicious_scale)
     return output
 
 

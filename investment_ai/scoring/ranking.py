@@ -1,5 +1,6 @@
 from __future__ import annotations
 import pandas as pd
+from investment_ai.scoring.short_term import CREDIBLE_SETUPS
 
 
 def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -24,7 +25,10 @@ def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     )
     lt["long_term_rank"] = range(1, len(lt) + 1)
     st = (
-        result[result.short_term_score.notna()]
+        result[
+            result.short_term_score.notna()
+            & result.get("short_term_setup", pd.Series("NONE", index=result.index)).isin(CREDIBLE_SETUPS)
+        ]
         .sort_values(
             [
                 "short_term_score",
@@ -43,5 +47,8 @@ def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     result["long_term_rank"] = result.symbol.map(ltr)
     result["short_term_rank"] = result.symbol.map(strank)
     lt = result[result.long_term_score.notna()].sort_values("long_term_rank")
-    st = result[result.short_term_score.notna()].sort_values("short_term_rank")
+    st = result[
+        result.short_term_score.notna()
+        & result.get("short_term_setup", pd.Series("NONE", index=result.index)).isin(CREDIBLE_SETUPS)
+    ].sort_values("short_term_rank")
     return lt, st

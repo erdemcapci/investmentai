@@ -5,7 +5,15 @@ import numpy as np
 import pandas as pd
 from investment_ai.features.analyst import expectations_score
 from investment_ai.features.risk import market_price_risk_score, risk_and_confidence
-from investment_ai.status import ERROR, FRESH, FRESH_CACHE, FRESH_PROVIDER, INSUFFICIENT, PARTIAL, STALE, STALE_FALLBACK
+from investment_ai.status import (
+    ERROR,
+    FRESH,
+    FRESH_CACHE,
+    FRESH_PROVIDER,
+    PARTIAL,
+    STALE,
+    STALE_FALLBACK,
+)
 from investment_ai.features.technical import add_relative_strength
 from investment_ai.features.valuation import add_peer_percentiles
 from investment_ai.scoring.common import curve, weighted
@@ -70,11 +78,26 @@ def _history_scores(row):
     return target, long_revenue
 
 
-def _drivers(row):
-    specs = (("Business quality","Quality","quality_score",.25),("Growth","Growth","growth_score",.20),
-             ("Valuation vs peers","Valuation","valuation_score",.20),
-             ("Long expectations","Expectations","expectations_long_score",.20),
-             ("Long trend","Trend","long_trend_score",.10),("Financial safety","Safety","financial_safety_score",.05))
+LT_DRIVER_SPECS = (
+    ("Business quality", "Quality", "quality_score", .25),
+    ("Growth", "Growth", "growth_score", .20),
+    ("Valuation vs peers", "Valuation", "valuation_score", .20),
+    ("Long expectations", "Long Expectations", "expectations_long_score", .20),
+    ("Long trend", "Long Trend", "long_trend_score", .10),
+    ("Financial safety", "Financial Safety", "financial_safety_score", .05),
+)
+ST_DRIVER_SPECS = (
+    ("Relative strength", "Relative Strength", "short_rs_score", .20),
+    ("Setup quality", "Setup Quality", "setup_quality_score", .25),
+    ("Short expectations", "Short Expectations", "expectations_short_score", .20),
+    ("Volume", "Volume", "volume_confirmation_score", .10),
+    ("Technical trend", "Technical Trend", "technical_trend_score", .15),
+    ("Event timing", "Event Timing", "event_timing_score", .10),
+)
+
+
+def _drivers(row, specs=LT_DRIVER_SPECS):
+    """Explain a score as headline weight times distance from neutral (50)."""
     candidates = []
     for name, pillar, key, weight in specs:
         score = row.get(key)
@@ -154,6 +177,15 @@ def build_analysis(
     frame["fcf_yield"] = np.where(
         frame.market_cap.gt(0), frame.free_cash_flow / frame.market_cap, np.nan
     )
+    frame["forward_growth_scale_warning"] = (
+        frame.get(
+            "forward_eps_growth_scale_warning", pd.Series(False, index=frame.index)
+        ).fillna(False).astype(bool)
+        | frame.get(
+            "forward_revenue_growth_scale_warning",
+            pd.Series(False, index=frame.index),
+        ).fillna(False).astype(bool)
+    )
     history_scores = frame.apply(
         lambda row: _history_scores_v31(row), axis=1, result_type="expand"
     )
@@ -192,15 +224,12 @@ def build_analysis(
         ],
         axis=1,
     )
-    frame = pd.concat(
-        [
-            frame,
-            pd.DataFrame(
-                [risk_and_confidence(row) for row in frame.to_dict("records")]
-            ),
-        ],
-        axis=1,
+    risk_results = pd.DataFrame(
+        [risk_and_confidence(row) for row in frame.to_dict("records")],
+        index=frame.index,
     )
+    for column in risk_results:
+        frame[column] = risk_results[column]
     long_term, short_term = rank_results(frame)
     frame["long_term_rank"] = frame.symbol.map(
         long_term.set_index("symbol").long_term_rank
@@ -208,10 +237,31 @@ def build_analysis(
     frame["short_term_rank"] = frame.symbol.map(
         short_term.set_index("symbol").short_term_rank
     )
-    drivers = frame.apply(_drivers, axis=1, result_type="expand")
-    frame[["positive_drivers", "negative_drivers", "driver_contributions"]] = drivers
-    frame["top_positive_driver"] = frame.positive_drivers.str.split(";").str[0]
-    frame["top_negative_driver"] = frame.negative_drivers.str.split(";").str[0]
+    lt_drivers = frame.apply(
+        lambda row: _drivers(row, LT_DRIVER_SPECS), axis=1, result_type="expand"
+    )
+    frame[
+        ["lt_positive_drivers", "lt_negative_drivers", "lt_driver_contributions"]
+    ] = lt_drivers
+    st_drivers = frame.apply(
+        lambda row: _drivers(row, ST_DRIVER_SPECS), axis=1, result_type="expand"
+    )
+    frame[
+        ["st_positive_drivers", "st_negative_drivers", "st_driver_contributions"]
+    ] = st_drivers
+    for horizon in ("lt", "st"):
+        frame[f"{horizon}_top_positive_driver"] = (
+            frame[f"{horizon}_positive_drivers"].str.split(";").str[0]
+        )
+        frame[f"{horizon}_top_negative_driver"] = (
+            frame[f"{horizon}_negative_drivers"].str.split(";").str[0]
+        )
+    # Compatibility aliases remain LT-specific; reports use explicit horizon fields.
+    frame["positive_drivers"] = frame["lt_positive_drivers"]
+    frame["negative_drivers"] = frame["lt_negative_drivers"]
+    frame["driver_contributions"] = frame["lt_driver_contributions"]
+    frame["top_positive_driver"] = frame["lt_top_positive_driver"]
+    frame["top_negative_driver"] = frame["lt_top_negative_driver"]
     frame["analyst_data_status"] = frame.get(
         "analyst_cache_status", pd.Series("INSUFFICIENT", index=frame.index)
     ).replace({FRESH_CACHE: FRESH, FRESH_PROVIDER: FRESH})
