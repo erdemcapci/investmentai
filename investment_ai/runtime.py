@@ -25,6 +25,8 @@ from investment_ai.config import (
     SCORING_MODEL_VERSION,
     OUTPUT_SCHEMA_VERSION,
     MIN_PEERS,
+    PRICE_FRESH_VALID_PCT,
+    PRICE_FRESH_INVALID_PCT,
 )
 
 ERROR_COLUMNS = [
@@ -100,10 +102,10 @@ def scoring_parameter_snapshot() -> dict[str, Any]:
         "minimum_peers": MIN_PEERS,
         "lt_weights": {item[2]: item[3] for item in LT_DRIVER_SPECS},
         "st_weights": {item[2]: item[3] for item in ST_DRIVER_SPECS},
-        "peer_fallback_order": ["region_sector", "region", "global_sector", "global"],
+        "peer_fallback_order": ["sector", "best_qualifying_own_index", "full_universe"],
         "setup_thresholds": {"credible_setup_required": True},
         "coverage_thresholds": {
-            "common_price": [97, 90],
+            "common_price": [PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT],
             "lt_component": [70, 55],
             "st_component": [75, 60],
         },
@@ -133,7 +135,7 @@ def run_status(
     metrics: dict[str, Any], universe_valid: bool = True
 ) -> tuple[str, list[str]]:
     required = {
-        "price_coverage_pct": (97, 90),
+        "price_fresh_coverage_pct": (PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT),
         "quality_coverage_pct": (70, 55),
         "valuation_coverage_pct": (70, 55),
         "expectations_coverage_pct": (75, 60),
@@ -142,14 +144,14 @@ def run_status(
     if not universe_valid:
         return "INVALID", ["combined universe validation failed"]
     for key, (_, floor) in required.items():
-        value = float(metrics.get(key, 0) or 0)
+        value = float(metrics.get(key, metrics.get("price_coverage_pct", 0) if key == "price_fresh_coverage_pct" else 0) or 0)
         if value < floor:
             reasons.append(f"{key}={value:.1f}% is below {floor}%")
     if reasons:
         return "INVALID", reasons
     degraded = []
     for key, (valid, _) in required.items():
-        value = float(metrics.get(key, 0) or 0)
+        value = float(metrics.get(key, metrics.get("price_coverage_pct", 0) if key == "price_fresh_coverage_pct" else 0) or 0)
         if value < valid:
             degraded.append(f"{key}={value:.1f}% is below {valid}%")
     return ("DEGRADED", degraded) if degraded else ("VALID", [])
@@ -183,7 +185,7 @@ def horizon_run_statuses(
         if universe_status == "INVALID"
         else evaluate(
             {
-                "price_coverage_pct": (97, 90),
+                "price_fresh_coverage_pct": (PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT),
             }
         )
     )
@@ -200,7 +202,7 @@ def horizon_run_statuses(
     )
     st = evaluate(
         {
-            "price_coverage_pct": (97, 90),
+            "price_fresh_coverage_pct": (PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT),
             "short_expectations_coverage_pct": (75, 60),
             "short_rs_coverage_pct": (75, 60),
             "setup_data_coverage_pct": (75, 60),

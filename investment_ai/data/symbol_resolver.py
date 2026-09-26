@@ -227,3 +227,41 @@ class SymbolResolver:
         )
         self.db.commit()
         return result
+
+    def verify(self, mapping: Mapping[str, Any], metadata: Mapping[str, Any] | None) -> SymbolMapping:
+        """Verify a deterministic candidate using metadata captured by the provider pass."""
+        current = SymbolMapping(**{field: mapping.get(field) for field in SymbolMapping.__dataclass_fields__})
+        if current.mapping_status == "VERIFIED" or not current.canonical_yahoo_symbol:
+            return current
+        if not metadata:
+            return current
+        now = datetime.now(timezone.utc).isoformat()
+        expected = set(re.findall(r"[a-z0-9]+", current.company_name.casefold())) - COMPANY_NOISE
+        provider_name = metadata.get("longName") or metadata.get("shortName") or metadata.get("name", "")
+        actual = set(re.findall(r"[a-z0-9]+", str(provider_name).casefold())) - COMPANY_NOISE
+        country_ok = not metadata.get("country") or str(metadata["country"]).casefold() == current.country.casefold()
+        exchange_ok = not current.exchange or not metadata.get("exchange") or str(metadata["exchange"]).casefold() == current.exchange.casefold()
+        quote_type = str(metadata.get("quoteType", "")).upper()
+        provider_symbol = str(metadata.get("symbol", "")).upper()
+        symbol_ok = not provider_symbol or provider_symbol == current.canonical_yahoo_symbol.upper()
+        identity_ok = bool(expected and actual and expected & actual) and country_ok and exchange_ok and symbol_ok and (not quote_type or quote_type in {"EQUITY", "ETF"})
+        status = "VERIFIED" if identity_ok else "AMBIGUOUS"
+        result = SymbolMapping(
+            current.security_id, current.listing_id, current.source_index,
+            current.source_symbol, current.company_name, current.country,
+            current.exchange, current.isin, current.canonical_yahoo_symbol,
+            "PROVIDER_METADATA" if identity_ok else current.mapping_method,
+            status, 0.95 if identity_ok else current.mapping_confidence,
+            now if identity_ok else None,
+            None if identity_ok else "provider identity mismatch",
+        )
+        self.db.execute(
+            """UPDATE security_mappings SET mapping_status=?,mapping_method=?,
+            mapping_confidence=?,verified_at_utc=?,last_seen_at_utc=?,mapping_error=?
+            WHERE source_index=? AND source_symbol=? AND country=?""",
+            (result.mapping_status, result.mapping_method, result.mapping_confidence,
+             result.mapping_verified_at_utc, now, result.mapping_error,
+             result.source_index, result.source_symbol, result.country),
+        )
+        self.db.commit()
+        return result

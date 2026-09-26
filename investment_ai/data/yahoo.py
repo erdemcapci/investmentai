@@ -213,6 +213,8 @@ class YahooClient:
             fetched_times.append(dates["fetched_at_utc"])
         info, info_status = self._provider_info(symbol, ticker)
         info_data = info.get("data", {})
+        for field in self.INFO_FIELDS:
+            result[f"provider_info_{field}"] = info_data.get(field)
         result["sector_raw_yahoo"] = info_data.get("sector")
         result["current_price_provider"] = info_data.get(
             "currentPrice", info_data.get("regularMarketPrice")

@@ -288,6 +288,14 @@ class HistoryStore:
             "price_as_of",
             "benchmark_symbol",
             "benchmark_price_as_of",
+            "security_id",
+            "benchmark_name",
+            "benchmark_return_basis",
+            "benchmark_currency",
+            "benchmark_assignment_method",
+            "trading_currency",
+            "financial_statement_currency",
+            "market_cap_currency",
         ]
         with self.db:
             self.db.executemany(
@@ -297,8 +305,11 @@ class HistoryStore:
                 price_at_prediction,benchmark_price_at_prediction,index_name,sector,quality_score,
                 growth_score,valuation_score,expectations_score,trend_score,setup_quality_score,
                 short_expectations_score,volume_score,price_as_of_utc,benchmark_symbol,
-                benchmark_price_as_of_utc,lt_run_status,st_run_status,overall_run_status
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                benchmark_price_as_of_utc,security_id,benchmark_name,benchmark_return_basis,
+                benchmark_currency,benchmark_assignment_method,trading_currency,
+                financial_statement_currency,market_cap_currency,
+                lt_run_status,st_run_status,overall_run_status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     [run_id, timestamp, row["symbol"], model_version]
                     + [row.get(k) for k in keys]

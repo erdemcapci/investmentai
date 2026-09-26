@@ -79,9 +79,9 @@ def download_combined_constituents() -> pd.DataFrame:
             "Both constituent sources are required for the combined universe"
         )
     connection = sqlite3.connect(HISTORY_DB)
-    resolver = SymbolResolver(
-        connection, metadata_lookup=YahooClient(JsonCache(CACHE_DIR)).metadata_lookup
-    )
+    # Resolution is deliberately offline.  Heuristic candidates are verified
+    # later from the provider_info payload fetched by the normal provider pass.
+    resolver = SymbolResolver(connection)
     resolved = []
     for row in frame.to_dict("records"):
         def present(name: str, fallback: str = ""):
@@ -151,8 +151,9 @@ def _constituent_health(universe: pd.DataFrame, now: datetime) -> dict[str, dict
         # Legacy frozen artifacts have no age telemetry; do not invent staleness.
         age = max(0.0, (now - fetched.min().to_pydatetime()).total_seconds() / 3600) if len(fetched) else 0.0
         verified = int(statuses.eq("VERIFIED").sum())
+        usable = int(statuses.isin(["VERIFIED", "HEURISTIC"]).sum())
         health = constituent_source_health(
-            name, len(source), verified, age,
+            name, len(source), usable, age,
             bool(source.get("constituent_source_cache_used", pd.Series(False, index=source.index)).fillna(False).astype(bool).any()),
         )
         health.update({
@@ -164,8 +165,43 @@ def _constituent_health(universe: pd.DataFrame, now: datetime) -> dict[str, dict
             "usable_mapping_pct": float(statuses.isin(["VERIFIED", "HEURISTIC"]).mean() * 100) if len(source) else 0.0,
             "status": health["source_status"],
         })
+        # Verification unavailability is visible but is not an integrity
+        # failure when a deterministic candidate remains otherwise usable.
+        if health["source_status"] == "VALID" and statuses.eq("HEURISTIC").any():
+            health["source_status"] = health["status"] = "DEGRADED"
+            health["status_reasons"].append("provider mapping verification unavailable")
         output[key] = health
     return output
+
+
+def _verify_provider_mappings(universe: pd.DataFrame, provider: pd.DataFrame) -> pd.DataFrame:
+    """Apply shared provider_info metadata without making another Yahoo request."""
+    result = universe.copy()
+    if result.empty or provider.empty or "mapping_status" not in result:
+        return result
+    metadata_fields = YahooClient.INFO_FIELDS
+    by_symbol = provider.drop_duplicates("symbol", keep="last").set_index("symbol")
+    connection = sqlite3.connect(HISTORY_DB)
+    resolver = SymbolResolver(connection)
+    try:
+        for index, row in result[result.mapping_status.eq("HEURISTIC")].iterrows():
+            if row.symbol not in by_symbol.index:
+                continue
+            captured = by_symbol.loc[row.symbol]
+            if not bool(captured.get("info_success", False)):
+                continue
+            metadata = {
+                field: captured.get(f"provider_info_{field}") for field in metadata_fields
+                if pd.notna(captured.get(f"provider_info_{field}"))
+            }
+            if not metadata:
+                continue
+            mapping = resolver.verify(row.to_dict(), metadata)
+            for key, value in mapping.as_dict().items():
+                result.at[index, key] = value
+    finally:
+        connection.close()
+    return result
 
 
 def _incremental_price_history(
@@ -310,7 +346,9 @@ def _provider_data(context: RunContext, universe: pd.DataFrame, logger) -> pd.Da
         captured
     )  # legacy resume key
     context.checkpoint["provider_symbols_usable"] = sorted(usable)
-    pending = universe[~universe.symbol.isin(captured)]
+    # A durable failure row is diagnostic, not a completed capture.  A resumed
+    # execution retries it once in this normal pass while skipping usable rows.
+    pending = universe[~universe.symbol.isin(usable)]
     total_batches = (len(pending) + 24) // 25
     for offset in range(0, len(pending), 25):
         batch = pending.iloc[offset : offset + 25]
@@ -520,38 +558,6 @@ def execute(
             context.checkpoint["universe_loaded"] = True
             context.save_checkpoint()
         timings["universe_load_seconds"] = time.monotonic() - start
-        constituent_sources = _constituent_health(universe, datetime.now(timezone.utc))
-        universe_health_status = (
-            "INVALID"
-            if any(item["source_status"] == "INVALID" for item in constituent_sources.values())
-            else "DEGRADED"
-            if any(item["source_status"] == "DEGRADED" for item in constituent_sources.values())
-            else "VALID"
-        )
-        if frozen_mode and not source_manifest.get("constituent_sources"):
-            # Exact replay preserves the historical run contract; old frozen
-            # artifacts predate source-health telemetry.
-            universe_health_status = "VALID"
-        mapping_columns = [
-            "source_index",
-            "source_symbol",
-            "company_name",
-            "country",
-            "exchange",
-            "isin",
-            "mapping_status",
-            "mapping_method",
-            "mapping_error",
-        ]
-        unmapped = universe[
-            ~universe.get(
-                "mapping_status", pd.Series("VERIFIED", index=universe.index)
-            ).eq("VERIFIED")
-        ]
-        atomic_csv(
-            unmapped.reindex(columns=mapping_columns),
-            context.directory / "unmapped_constituents.csv",
-        )
         analysis_universe = universe[
             universe.get("mapping_status", pd.Series("VERIFIED", index=universe.index))
             .isin(["VERIFIED", "HEURISTIC"])
@@ -639,6 +645,27 @@ def execute(
         timings["provider_fetch_seconds"] = time.monotonic() - start
 
         if not frozen_mode:
+            universe = _verify_provider_mappings(universe, provider)
+            atomic_csv(universe, context.directory / "universe.csv")
+            analysis_universe = universe[
+                universe.get("mapping_status", pd.Series("VERIFIED", index=universe.index)).isin(["VERIFIED", "HEURISTIC"])
+                & universe.symbol.notna()
+            ].copy()
+        constituent_sources = _constituent_health(universe, datetime.now(timezone.utc))
+        universe_health_status = (
+            "INVALID" if any(item["source_status"] == "INVALID" for item in constituent_sources.values())
+            else "DEGRADED" if any(item["source_status"] == "DEGRADED" for item in constituent_sources.values())
+            else "VALID"
+        )
+        if frozen_mode and not source_manifest.get("constituent_sources"):
+            universe_health_status = "VALID"
+        mapping_columns = ["source_index", "source_symbol", "company_name", "country",
+                           "exchange", "isin", "mapping_status", "mapping_method", "mapping_error"]
+        statuses = universe.get("mapping_status", pd.Series("VERIFIED", index=universe.index))
+        atomic_csv(universe[~statuses.eq("VERIFIED")].reindex(columns=mapping_columns),
+                   context.directory / "unmapped_constituents.csv")
+
+        if not frozen_mode:
             context.freeze_analysis_as_of()
         elif source_manifest.get("analysis_as_of_utc"):
             context.checkpoint["analysis_as_of_utc"] = source_manifest[
@@ -698,6 +725,11 @@ def execute(
         context.checkpoint["analysis_complete"] = True
         context.save_checkpoint()
 
+        price_status = (
+            prices["price_data_status"]
+            if "price_data_status" in prices
+            else pd.Series(np.where(prices.get("current_price", pd.Series(np.nan, index=prices.index)).notna(), "FRESH", "INSUFFICIENT"), index=prices.index)
+        )
         metrics = {
             "universe_count": len(universe),
             "sp500_count": int(
@@ -709,7 +741,12 @@ def execute(
             "duplicate_membership_count": int(
                 universe.index_name.str.contains("|", regex=False).sum()
             ),
+            "price_present_coverage_pct": _coverage(prices, "current_price"),
+            # Compatibility alias: explicitly means presence, never freshness.
             "price_coverage_pct": _coverage(prices, "current_price"),
+            "price_fresh_coverage_pct": float(price_status.eq("FRESH").mean() * 100) if len(prices) else 0.0,
+            "price_stale_coverage_pct": float(price_status.eq("STALE").mean() * 100) if len(prices) else 0.0,
+            "price_insufficient_coverage_pct": float(price_status.isin(["INSUFFICIENT", "ERROR"]).mean() * 100) if len(prices) else 0.0,
             "analyst_coverage_pct": _coverage(full, "expectations_long_score"),
             "quality_coverage_pct": _coverage(full, "quality_score"),
             "growth_coverage_pct": _coverage(full, "growth_score"),
@@ -1037,10 +1074,10 @@ Common status: {health_details["common_run_status"]}
 LT status: {health_details["lt_run_status"]}
 ST status: {health_details["st_run_status"]}
 Universe: {metrics["universe_count"]} | LT ranked: {metrics["lt_ranked_count"]} | ST ranked: {metrics["st_ranked_count"]}
-Price coverage: {metrics["price_coverage_pct"]:.1f}% | Quality coverage: {metrics["quality_coverage_pct"]:.1f}% | Growth coverage: {metrics["growth_coverage_pct"]:.1f}%
+Price present/fresh coverage: {metrics["price_present_coverage_pct"]:.1f}%/{metrics["price_fresh_coverage_pct"]:.1f}% | Quality coverage: {metrics["quality_coverage_pct"]:.1f}% | Growth coverage: {metrics["growth_coverage_pct"]:.1f}%
 Valuation coverage: {metrics["valuation_coverage_pct"]:.1f}% | Long Expectations: {metrics["long_expectations_coverage_pct"]:.1f}% | Short Expectations: {metrics["short_expectations_coverage_pct"]:.1f}%
 Provider errors: {metrics["provider_error_symbol_count"]} | Stale fallbacks: {metrics["stale_fallback_count"]} | Outcome rows updated: {outcomes_updated}
-Constituents: S&P {constituent_sources['sp500']['source_status']} ({constituent_sources['sp500']['mapping_success_pct']:.1f}% verified) | STOXX {constituent_sources['stoxx600']['source_status']} ({constituent_sources['stoxx600']['mapping_success_pct']:.1f}% verified)
+Constituents: S&P {constituent_sources['sp500']['source_status']} ({constituent_sources['sp500']['mapping_success_pct']:.1f}% usable) | STOXX {constituent_sources['stoxx600']['source_status']} ({constituent_sources['stoxx600']['mapping_success_pct']:.1f}% usable)
 Artifacts: {context.directory}""")
         logger.info("run end")
         return 0

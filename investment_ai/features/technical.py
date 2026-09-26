@@ -40,13 +40,18 @@ def price_features(history: pd.DataFrame, now: datetime | None = None) -> dict[s
         h.get("Volume", pd.Series(index=h.index, dtype=float)), errors="coerce"
     ).where(lambda values: values >= 0)
     daily = close.pct_change(fill_method=None)
-    age = max((today - close.index[-1].date()).days, 0)
-    status = "FRESH" if age <= 4 else "STALE" if age <= 7 else "INSUFFICIENT"
+    last_date = close.index[-1].date()
+    age = max((today - last_date).days, 0)
+    # Count expected completed weekdays, excluding today because its daily bar may
+    # still be forming.  This keeps Friday's close fresh over a weekend.
+    missed_sessions = max(int(np.busday_count(last_date + pd.Timedelta(days=1), today)), 0)
+    status = "FRESH" if missed_sessions <= 1 else "STALE" if missed_sessions <= 3 else "INSUFFICIENT"
     out = {
         "current_price": close.iloc[-1],
         "price_as_of": close.index[-1].isoformat(),
         "technical_price_as_of": close.index[-1].isoformat(),
         "price_age_calendar_days": age,
+        "price_missed_expected_sessions": missed_sessions,
         "price_data_status": status,
     }
     for n in (1, 2, 5, 20, 60, 126, 252):
