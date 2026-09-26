@@ -151,7 +151,7 @@ def test_manifest_has_versions_coverage_and_config(tmp_path, monkeypatch):
     manifest = build_manifest(
         context, {"price_coverage_pct": 99, "universe_count": 2}, {"top_n": 10}
     )
-    assert manifest["application_version"] == "1.1.0"
+    assert manifest["application_version"] == "1.1.1"
     assert manifest["scoring_model_version"] == "3.1.1"
     assert manifest["cache_schema_version"] == 3
     assert manifest["database_schema_version"] == 5

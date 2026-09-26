@@ -18,6 +18,7 @@ KNOWN_EXCEPTIONS = {
     ("sweden", "HMB"): "HM-B.ST",
     ("switzerland", "SRENH"): "SREN.SW",
 }
+COMPANY_NOISE = {"plc", "ag", "sa", "se", "nv", "ab", "group", "holding", "holdings", "the"}
 
 
 @dataclass(frozen=True)
@@ -152,12 +153,11 @@ class SymbolResolver:
                 if isinstance(metadata, list):
                     status, error = "AMBIGUOUS", "multiple provider candidates"
                 elif metadata:
-                    expected = set(re.findall(r"[a-z0-9]+", company_name.casefold()))
+                    expected = set(re.findall(r"[a-z0-9]+", company_name.casefold())) - COMPANY_NOISE
+                    provider_name = metadata.get("longName") or metadata.get("shortName") or metadata.get("name", "")
                     actual = set(
-                        re.findall(
-                            r"[a-z0-9]+", str(metadata.get("name", "")).casefold()
-                        )
-                    )
+                        re.findall(r"[a-z0-9]+", str(provider_name).casefold())
+                    ) - COMPANY_NOISE
                     country_ok = (
                         not metadata.get("country")
                         or str(metadata["country"]).casefold() == country.casefold()
@@ -167,7 +167,12 @@ class SymbolResolver:
                         or not metadata.get("exchange")
                         or str(metadata["exchange"]).casefold() == exchange.casefold()
                     )
-                    if expected & actual and country_ok and exchange_ok:
+                    quote_type = str(metadata.get("quoteType", "")).upper()
+                    listing_ok = not quote_type or quote_type in {"EQUITY", "ETF"}
+                    # A meaningful shared identity token is required; merely
+                    # receiving a Yahoo object never verifies a mapping.
+                    name_ok = bool(expected and actual and expected & actual)
+                    if name_ok and country_ok and exchange_ok and listing_ok:
                         status, confidence, verified, method = (
                             "VERIFIED",
                             0.95,

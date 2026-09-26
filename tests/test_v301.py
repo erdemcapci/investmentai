@@ -377,7 +377,7 @@ def test_canonical_main_mocked_integration(monkeypatch, tmp_path):
         }
     )
     monkeypatch.setattr(app, "download_combined_constituents", lambda: universe)
-    monkeypatch.setattr(app, "download_prices", lambda *_: pd.DataFrame())
+    monkeypatch.setattr(app, "_incremental_price_history", lambda *_: (pd.DataFrame(), 0))
     monkeypatch.setattr(
         app,
         "build_price_features",

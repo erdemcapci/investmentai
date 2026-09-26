@@ -70,6 +70,27 @@ class PriceStore:
             parse_dates=["date"],
         )
 
+    def histories(self, securities: Mapping[str, str]) -> pd.DataFrame:
+        """Reconstruct the yfinance-shaped canonical adjusted history."""
+        frames = {}
+        for security_id, symbol in securities.items():
+            history = self.history(security_id)
+            if history.empty:
+                continue
+            frame = history.set_index("date")[["adjusted_close", "volume"]].rename(
+                columns={"adjusted_close": "Close", "volume": "Volume"}
+            )
+            frames[symbol] = frame
+        return pd.concat(frames, axis=1) if frames else pd.DataFrame()
+
+    def security_id_for_symbol(self, symbol: str) -> str | None:
+        row = self.db.execute(
+            "SELECT security_id FROM daily_prices WHERE symbol=? "
+            "ORDER BY date DESC LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        return row[0] if row else None
+
     def missing_ranges(
         self,
         securities: Mapping[str, str],

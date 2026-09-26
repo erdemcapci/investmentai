@@ -17,6 +17,7 @@ from investment_ai.status import (
 from investment_ai.features.technical import add_relative_strength
 from investment_ai.features.benchmark import add_benchmark_relative_strength
 from investment_ai.features.valuation import add_peer_percentiles
+from investment_ai.features.fundamentals import is_financial
 from investment_ai.scoring.common import curve, weighted
 from investment_ai.scoring.long_term import score_long_term
 from investment_ai.scoring.ranking import rank_results
@@ -88,6 +89,36 @@ def target_metrics(frame: pd.DataFrame) -> pd.DataFrame:
         },
         index=frame.index,
     )
+
+
+def apply_fcf_currency_guard(frame: pd.DataFrame) -> pd.DataFrame:
+    """Calculate FCF yield only where statement and market currencies agree."""
+    result = frame.copy()
+    financial_currency = result.get(
+        "financial_statement_currency", pd.Series(np.nan, index=result.index)
+    )
+    market_currency = result.get(
+        "market_cap_currency", pd.Series(np.nan, index=result.index)
+    )
+    compatible = (
+        financial_currency.notna()
+        & market_currency.notna()
+        & financial_currency.eq(market_currency)
+    )
+    result["currency_mismatch_flag"] = (
+        financial_currency.notna() & market_currency.notna() & ~compatible
+    )
+    result["fcf_yield"] = np.where(
+        compatible & result.market_cap.gt(0),
+        result.free_cash_flow / result.market_cap,
+        np.nan,
+    )
+    result["fcf_yield_currency_status"] = np.select(
+        [compatible, result["currency_mismatch_flag"]],
+        ["COMPATIBLE", "CURRENCY_MISMATCH"],
+        default="CURRENCY_UNAVAILABLE",
+    )
+    return result
 
 
 def _history_scores_v31(row):
@@ -228,6 +259,12 @@ def build_analysis(
     frame["sector_source"] = np.where(yahoo.notna(), "YAHOO", "CONSTITUENT")
     frame["sector_normalization_method"] = "CANONICAL_MAP"
     frame["sector"] = frame["sector_normalized"]
+    canonical_financial = frame["sector"].map(is_financial)
+    frame["is_financial"] = canonical_financial
+    frame["roic_applicable"] = ~canonical_financial
+    for column in ("roic", "net_debt_to_ebitda"):
+        if column in frame:
+            frame.loc[canonical_financial, column] = np.nan
     targets = target_metrics(frame)
     frame[["target_range_valid", "target_upside_pct", "target_dispersion_pct"]] = (
         targets[["target_range_valid", "target_upside_pct", "target_dispersion_pct"]]
@@ -245,30 +282,7 @@ def build_analysis(
         (provider_price / completed_price - 1) * 100,
         np.nan,
     )
-    financial_currency = frame.get(
-        "financial_statement_currency", pd.Series(np.nan, index=frame.index)
-    )
-    market_currency = frame.get(
-        "market_cap_currency", pd.Series(np.nan, index=frame.index)
-    )
-    compatible = (
-        financial_currency.notna()
-        & market_currency.notna()
-        & financial_currency.eq(market_currency)
-    )
-    frame["currency_mismatch_flag"] = (
-        financial_currency.notna() & market_currency.notna() & ~compatible
-    )
-    frame["fcf_yield"] = np.where(
-        compatible & frame.market_cap.gt(0),
-        frame.free_cash_flow / frame.market_cap,
-        np.nan,
-    )
-    frame["fcf_yield_currency_status"] = np.select(
-        [compatible, frame["currency_mismatch_flag"]],
-        ["COMPATIBLE", "CURRENCY_MISMATCH"],
-        default="CURRENCY_UNAVAILABLE",
-    )
+    frame = apply_fcf_currency_guard(frame)
     frame["forward_growth_scale_warning"] = frame.get(
         "forward_eps_growth_scale_warning", pd.Series(False, index=frame.index)
     ).fillna(False).astype(bool) | frame.get(

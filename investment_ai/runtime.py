@@ -156,7 +156,7 @@ def run_status(
 
 
 def horizon_run_statuses(
-    metrics: dict[str, Any], universe_valid: bool = True
+    metrics: dict[str, Any], universe_valid: bool | str = True
 ) -> dict[str, Any]:
     """Evaluate shared, long-term and short-term input readiness independently."""
 
@@ -175,15 +175,20 @@ def horizon_run_statuses(
         ]
         return ("DEGRADED", degraded) if degraded else ("VALID", [])
 
+    universe_status = (
+        universe_valid if isinstance(universe_valid, str) else "VALID" if universe_valid else "INVALID"
+    )
     common = (
         ("INVALID", ["combined universe validation failed"])
-        if not universe_valid
+        if universe_status == "INVALID"
         else evaluate(
             {
                 "price_coverage_pct": (97, 90),
             }
         )
     )
+    if universe_status == "DEGRADED" and common[0] == "VALID":
+        common = ("DEGRADED", ["constituent universe health degraded"])
     lt = evaluate(
         {
             "quality_coverage_pct": (70, 55),
@@ -407,7 +412,7 @@ def build_manifest(
         "database_schema_version": DATABASE_SCHEMA_VERSION,
         "output_schema_version": OUTPUT_SCHEMA_VERSION,
         "technical_price_basis": "AUTO_ADJUSTED",
-        "validation_return_basis": "PRICE_RETURN",
+        "validation_return_basis": "ADJUSTED_CLOSE_RETURN",
         "git_commit_sha": sha,
         "git_dirty_flag": dirty,
         "python_version": sys.version.split()[0],

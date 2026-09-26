@@ -35,6 +35,15 @@ from investment_ai.features.valuation import parse_valuation
 RATE_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
 
 
+def currency_metadata(info: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Yahoo trading and statement currency fields without guessing."""
+    return {
+        "trading_currency": info.get("currency"),
+        "market_cap_currency": info.get("currency"),
+        "financial_statement_currency": info.get("financialCurrency"),
+    }
+
+
 def aggregate_component_status(statuses: list[str]) -> str:
     """Summarize component health with errors taking precedence over staleness."""
     if not statuses or all(value in {ERROR, "INSUFFICIENT"} for value in statuses):
@@ -104,6 +113,25 @@ class YahooClient:
 
     def __init__(self, cache: JsonCache):
         self.cache = cache
+
+    def metadata_lookup(self, symbol: str) -> dict[str, Any] | None:
+        """Return cached, identity-bearing listing metadata for symbol resolution."""
+        item, status = self.cache.get_or_fetch(
+            "symbol_identity",
+            symbol,
+            ANALYST_TTL_HOURS,
+            lambda: {
+                key: value
+                for key, value in (call_with_retry(yf.Ticker(symbol).get_info) or {}).items()
+                if key in {
+                    "longName", "shortName", "country", "exchange",
+                    "fullExchangeName", "quoteType", "symbol",
+                }
+            },
+            FORCE_REFRESH,
+            _meaningful,
+        )
+        return item.get("data") if status != ERROR else None
 
     def _component(
         self,
@@ -183,7 +211,10 @@ class YahooClient:
             lambda: {
                 key: value
                 for key, value in (call_with_retry(ticker.get_info) or {}).items()
-                if key in {"sector", "currentPrice", "regularMarketPrice"}
+                if key in {
+                    "sector", "currentPrice", "regularMarketPrice",
+                    "currency", "financialCurrency",
+                }
             },
             FORCE_REFRESH,
             _meaningful,
@@ -193,6 +224,7 @@ class YahooClient:
         result["current_price_provider"] = info_data.get(
             "currentPrice", info_data.get("regularMarketPrice")
         )
+        result.update(currency_metadata(info_data))
         result["info_success"] = info_status in {FRESH_PROVIDER, FRESH_CACHE}
         result["info_cache_status"] = info_status
         result["info_fetched_at_utc"] = info.get("fetched_at_utc")
@@ -218,7 +250,9 @@ class YahooClient:
             "fundamentals",
             symbol,
             FUNDAMENTALS_TTL_HOURS,
-            lambda: self._fundamentals(ticker, sector),
+            # Provider sector is canonical when present and must drive all
+            # financial/non-financial applicability decisions.
+            lambda: self._fundamentals(ticker, info_data.get("sector") or sector),
             FORCE_REFRESH,
             _meaningful,
         )

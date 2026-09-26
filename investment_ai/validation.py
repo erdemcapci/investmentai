@@ -9,6 +9,8 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+from investment_ai.config import TOP_N_MIN_OUTCOME_COVERAGE_PCT
+
 HORIZONS = {"5d": 5, "10d": 10, "20d": 20, "3m": 63, "6m": 126, "12m": 252}
 NON_OVERLAP_SPACING = {"5d": 5, "10d": 10, "20d": 20, "3m": 63, "6m": 126, "12m": 252}
 
@@ -85,7 +87,15 @@ def update_outcomes(
             column = f"forward_{label}_return"
             if row.get(column) is not None:
                 continue
-            if stock is None:
+            baseline_time = pd.Timestamp(row["run_timestamp"])
+            if baseline_time.tzinfo is None:
+                baseline_time = baseline_time.tz_localize("UTC")
+            mature_by_time = pd.Timestamp(now) >= baseline_time + pd.Timedelta(
+                days=int(sessions * 7 / 5) + 4
+            )
+            if not mature_by_time:
+                status, reason = "NOT_MATURE", "horizon has not elapsed"
+            elif stock is None:
                 status, reason = "DELISTED_OR_UNAVAILABLE", "no provider history"
             else:
                 actual = realized_return(
@@ -95,7 +105,7 @@ def update_outcomes(
                     row.get("price_at_prediction"),
                 )
                 if pd.isna(actual):
-                    status, reason = "NOT_MATURE", "insufficient completed sessions"
+                    status, reason = "INSUFFICIENT_HISTORY", "insufficient completed sessions"
                 else:
                     status, reason, assignments[column] = "AVAILABLE", None, actual
                     bench = (
@@ -139,25 +149,42 @@ def _per_run(frame: pd.DataFrame, horizon: str) -> pd.DataFrame:
     rows = []
     for run_id, all_rows in frame.groupby("run_id", sort=True):
         ranked = all_rows.dropna(subset=[score, rank])
-        priced = ranked.dropna(subset=[ret])
         if ranked.empty:
             continue
+        statuses = ranked.get("outcome_status", pd.Series(index=ranked.index, dtype=object))
+        matured = ranked[~statuses.eq("NOT_MATURE")]
+        priced = matured[matured[ret].notna() & statuses.loc[matured.index].eq("AVAILABLE")]
         item = {
             "run_id": run_id,
             "analysis_as_of": all_rows.run_timestamp.iloc[0],
             "horizon": horizon,
             "ranked_count": len(ranked),
-            "matured_count": len(priced),
-            "outcome_coverage_pct": len(priced) / len(ranked) * 100,
+            "matured_count": len(matured),
+            "outcome_coverage_pct": len(priced) / len(matured) * 100 if len(matured) else 0,
         }
         for n in (10, 25, 50):
-            top = priced.nsmallest(n, rank)
+            # Freeze the selected portfolio before looking at outcomes. Missing
+            # members are never replaced by lower-ranked securities.
+            selected = ranked.nsmallest(n, rank)
+            selected_matured = selected[
+                ~selected.get("outcome_status", pd.Series(index=selected.index, dtype=object)).eq("NOT_MATURE")
+            ]
+            top = selected_matured[selected_matured[ret].notna()]
+            selected_count = len(selected_matured)
+            coverage = len(top) / selected_count * 100 if selected_count else 0.0
+            item[f"top_{n}_selected_count"] = selected_count
+            item[f"top_{n}_priced_count"] = len(top)
+            item[f"top_{n}_missing_count"] = selected_count - len(top)
+            item[f"top_{n}_coverage_pct"] = coverage
             item[f"top_{n}_equal_weight_return"] = (
-                top[ret].mean() if len(top) else np.nan
+                top[ret].mean()
+                if len(top) and coverage >= TOP_N_MIN_OUTCOME_COVERAGE_PCT
+                else np.nan
             )
             item[f"top_{n}_equal_weight_excess_return"] = (
                 top[excess].mean()
-                if excess in top and top[excess].notna().any()
+                if coverage >= TOP_N_MIN_OUTCOME_COVERAGE_PCT
+                and excess in top and top[excess].notna().any()
                 else np.nan
             )
         item["cross_sectional_spearman_ic"] = (
@@ -238,32 +265,52 @@ def validation_report(connection: sqlite3.Connection, mode: str = "ALL_RUNS") ->
             if len(frame)
             else frame
         )
+        statuses = pd.read_sql_query(
+            "SELECT run_id,symbol,status FROM outcome_status WHERE horizon=?",
+            connection,
+            params=(horizon,),
+        )
+        if len(eligible):
+            eligible = eligible.merge(statuses, on=["run_id", "symbol"], how="left")
+            eligible["outcome_status"] = eligible["status"]
+            eligible.loc[
+                eligible["outcome_status"].isna()
+                & eligible[f"forward_{horizon}_return"].notna(),
+                "outcome_status",
+            ] = "AVAILABLE"
+            eligible["outcome_status"] = eligible["outcome_status"].fillna("NOT_MATURE")
         runs = _per_run(eligible, horizon)
         if mode == "NON_OVERLAPPING" and len(runs):
-            runs = runs.sort_values("analysis_as_of").iloc[
-                :: NON_OVERLAP_SPACING[horizon]
-            ]
-        return_col = f"forward_{horizon}_return"
-        priced = int(eligible[return_col].notna().sum()) if len(eligible) else 0
-        unavailable = 0
-        try:
-            unavailable = connection.execute(
-                "SELECT COUNT(*) FROM outcome_status WHERE horizon=? AND status IN ('DELISTED_OR_UNAVAILABLE','PRICE_MISSING','TICKER_CHANGED')",
-                (horizon,),
-            ).fetchone()[0]
-        except sqlite3.OperationalError:
-            pass
+            ordered = runs.sort_values("analysis_as_of")
+            selected, last = [], None
+            spacing = pd.Timedelta(days=int(NON_OVERLAP_SPACING[horizon] * 7 / 5))
+            for index, row in ordered.iterrows():
+                current = pd.to_datetime(row["analysis_as_of"], utc=True)
+                if last is None or current >= last + spacing:
+                    selected.append(index)
+                    last = current
+            runs = ordered.loc[selected]
+        total = len(eligible)
+        not_mature = int(eligible.get("outcome_status", pd.Series(dtype=str)).eq("NOT_MATURE").sum())
+        matured = total - not_mature
+        priced = int(eligible.get("outcome_status", pd.Series(dtype=str)).eq("AVAILABLE").sum())
+        unavailable = matured - priced
         summary = _aggregate(runs, priced)
         summary.update(
             {
                 "mode": mode,
-                "eligible_predictions": len(eligible),
-                "matured_predictions": priced + unavailable,
+                "eligible_predictions": total,
+                "total_predictions": total,
+                "not_mature_predictions": not_mature,
+                "matured_predictions": matured,
+                "available_outcomes": priced,
+                "unavailable_outcomes": unavailable,
                 "successfully_priced_outcomes": priced,
-                "missing_outcomes": max(0, len(eligible) - priced),
+                "missing_outcomes": unavailable,
                 "unavailable_or_delisted_outcomes": unavailable,
-                "outcome_coverage_pct": priced / len(eligible) * 100
-                if len(eligible)
+                "coverage_among_matured_pct": priced / matured * 100 if matured else 0,
+                "outcome_coverage_pct": priced / matured * 100
+                if matured
                 else 0,
                 "per_run": runs.to_dict("records"),
             }
