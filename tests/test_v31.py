@@ -45,7 +45,7 @@ def test_valid_stale_cache_is_only_allowed_fallback(tmp_path):
     cache = JsonCache(tmp_path)
     old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     cache._path("x", "A").write_text(
-        f'{{"cache_schema_version":2,"fetched_at_utc":"{old}","data":{{"value":1}}}}'
+        f'{{"cache_schema_version":3,"fetched_at_utc":"{old}","data":{{"value":1}}}}'
     )
     _, status = cache.get_or_fetch("x", "A", 1, lambda: (_ for _ in ()).throw(RuntimeError()), validator=lambda d: d.get("value") == 1)
     assert status == STALE_FALLBACK
