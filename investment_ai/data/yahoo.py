@@ -154,6 +154,7 @@ class YahooClient:
             result[f"{name}_success"] = status in {FRESH_PROVIDER, FRESH_CACHE}
             result[f"{name}_cache_status"] = status
             result[f"{name}_fetched_at_utc"] = item.get("fetched_at_utc")
+            result[f"{name}_error_message"] = str(item.get("error", ""))[:1000] or None
             component_statuses.append(status)
             if item.get("fetched_at_utc"):
                 fetched_times.append(item["fetched_at_utc"])
@@ -224,6 +225,8 @@ class YahooClient:
                 "fundamental_cache_status": fundamental_status,
                 "valuation_fetched_at_utc": valuation.get("fetched_at_utc"),
                 "fundamentals_fetched_at_utc": fundamentals.get("fetched_at_utc"),
+                "valuation_error_message": str(valuation.get("error", ""))[:1000] or None,
+                "fundamental_error_message": str(fundamentals.get("error", ""))[:1000] or None,
             }
         )
         errors.extend(

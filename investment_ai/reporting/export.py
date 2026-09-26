@@ -12,12 +12,23 @@ def export_run(
     st: pd.DataFrame,
     metadata: dict,
     methodology: pd.DataFrame,
+    lt_status: str = "VALID",
+    st_status: str = "VALID",
 ):
     directory.mkdir(parents=True, exist_ok=True)
     insufficient = full[full.long_term_score.isna() & full.short_term_score.isna()]
     atomic_csv(full, directory / "full_analysis.csv")
-    atomic_csv(lt[[c for c in LT_COLUMNS if c in lt]], directory / "long_term_ranking.csv")
-    atomic_csv(st[[c for c in ST_COLUMNS if c in st]], directory / "short_term_ranking.csv")
+    for frame, columns, status, normal, diagnostic in (
+        (lt, LT_COLUMNS, lt_status, "long_term_ranking.csv", "long_term_ranking_invalid_diagnostic.csv"),
+        (st, ST_COLUMNS, st_status, "short_term_ranking.csv", "short_term_ranking_invalid_diagnostic.csv"),
+    ):
+        output = frame[[c for c in columns if c in frame]].copy()
+        output.insert(0, "run_status", status)
+        target = diagnostic if status == "INVALID" else normal
+        atomic_csv(output, directory / target)
+        stale = directory / (normal if status == "INVALID" else diagnostic)
+        if stale.exists():
+            stale.unlink()
     atomic_csv(insufficient, directory / "insufficient_data.csv")
     atomic_csv(pd.DataFrame([metadata]), directory / "run_metadata.csv")
     (directory / "methodology.md").write_text(

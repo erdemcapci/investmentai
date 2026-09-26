@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.1 — stabilization
+
+- Repaired GitHub CI packaging and made Python 3.12 the sole supported runtime.
+- Made resume point-in-time correct with durable run-start and analysis-as-of timestamps,
+  incremental provider checkpoints, artifact reconciliation, and retained errors.
+- Split compatible exact replay from explicit rescore, with version/integrity checks and
+  frozen rank-change diagnostics.
+- Corrected validation baselines, automated matured-outcome updates, added excess-return
+  reporting, and migrated prediction storage non-destructively to database schema 3.
+- Added common/LT/ST health gates, invalid-view export suppression, and clearer degraded
+  outputs without changing scoring model 3.1.1.
+- Expanded operational errors, timing, artifact checksums, and regional benchmark health
+  telemetry; removed the placeholder provider schema-rejection metric.
+
 ## v1.0.0 — application release
 
 - **Scoring model:** 3.1.1 (unchanged). Benchmark-adjusted RS is captured side-by-side

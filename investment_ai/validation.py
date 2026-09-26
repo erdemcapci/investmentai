@@ -15,14 +15,25 @@ def sample_status(n: int) -> str:
     return "INSUFFICIENT_SAMPLE" if n < 30 else "EARLY_SAMPLE" if n < 100 else "USABLE"
 
 
-def realized_return(history: pd.Series, timestamp: str, sessions: int) -> float:
-    """Return from first close on/after prediction time to exactly N later sessions."""
+def realized_return(history: pd.Series, timestamp: str, sessions: int,
+                    baseline_price: float | None = None) -> float:
+    """Return from a saved close to the Nth completed observation after its date."""
     values = pd.to_numeric(history, errors="coerce").dropna().sort_index()
     values.index = pd.to_datetime(values.index, utc=True)
-    eligible = values.loc[values.index >= pd.Timestamp(timestamp)]
-    if len(eligible) <= sessions:
+    baseline = pd.Timestamp(timestamp)
+    eligible = values.loc[values.index > baseline]
+    if len(eligible) < sessions:
         return np.nan
-    return float((eligible.iloc[sessions] / eligible.iloc[0] - 1) * 100)
+    if baseline_price is None:
+        # Compatibility for callers that provide a history observation as t0.
+        at_or_after = values.loc[values.index >= baseline]
+        if len(at_or_after) <= sessions:
+            return np.nan
+        baseline_price = float(at_or_after.iloc[0])
+        future = float(at_or_after.iloc[sessions])
+    else:
+        future = float(eligible.iloc[sessions - 1])
+    return float((future / float(baseline_price) - 1) * 100)
 
 
 def update_outcomes(connection: sqlite3.Connection, stock_history: Mapping[str, pd.Series],
@@ -38,7 +49,7 @@ def update_outcomes(connection: sqlite3.Connection, stock_history: Mapping[str, 
     for raw in rows:
         row = dict(zip(names, raw))
         stock = stock_history.get(row["symbol"])
-        benchmark = benchmark_history.get(row.get("index_name"))
+        benchmark = benchmark_history.get(row.get("benchmark_symbol"))
         if stock is None:
             continue
         assignments = {}
@@ -46,8 +57,12 @@ def update_outcomes(connection: sqlite3.Connection, stock_history: Mapping[str, 
             column = f"forward_{label}_return"
             if row.get(column) is not None:
                 continue
-            actual = realized_return(stock, row["run_timestamp"], sessions)
-            bench = realized_return(benchmark, row["run_timestamp"], sessions) if benchmark is not None else np.nan
+            actual = realized_return(stock, row.get("price_as_of_utc") or row["run_timestamp"],
+                                     sessions, row.get("price_at_prediction"))
+            bench = realized_return(
+                benchmark, row.get("benchmark_price_as_of_utc") or row["run_timestamp"],
+                sessions, row.get("benchmark_price_at_prediction"),
+            ) if benchmark is not None else np.nan
             if pd.notna(actual):
                 assignments[column] = actual
                 if pd.notna(bench):
@@ -76,15 +91,27 @@ def validation_report(connection: sqlite3.Connection) -> dict:
         valid = frame.dropna(subset=[score_column, return_column]) if len(frame) else frame
         summary = {"N": len(valid), "status": sample_status(len(valid))}
         if len(valid):
+            excess_column = f"excess_forward_{horizon}_return"
+            excess = valid[excess_column].dropna()
             summary.update({
                 "mean": valid[return_column].mean(), "median": valid[return_column].median(),
                 "standard_deviation": valid[return_column].std(),
                 "win_rate": valid[return_column].gt(0).mean(),
                 "rank_correlation": valid[score_column].corr(valid[return_column], method="spearman"),
                 "top": {str(n): valid.nsmallest(n, rank_column)[return_column].median() for n in (10, 25, 50)},
+                "mean_excess_return": excess.mean() if len(excess) else None,
+                "median_excess_return": excess.median() if len(excess) else None,
+                "excess_win_rate": excess.gt(0).mean() if len(excess) else None,
+                "top_excess_median": {
+                    str(n): valid.nsmallest(n, rank_column)[excess_column].median()
+                    for n in (10, 25, 50)
+                },
                 "score_buckets": {
-                    str(label): group[return_column].median() for label, group in
-                    valid.groupby(pd.cut(valid[score_column], [60, 70, 80, 90, 100], right=False))
+                    label: group[return_column].median() for label, group in valid.groupby(
+                        pd.cut(valid[score_column], bins=[60, 70, 80, 90, 100],
+                               labels=["60–70", "70–80", "80–90", "90–100"],
+                               include_lowest=True, right=True), observed=False
+                    )
                 },
             })
         output[horizon] = summary
