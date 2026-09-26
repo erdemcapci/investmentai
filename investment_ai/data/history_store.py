@@ -75,6 +75,9 @@ class HistoryStore:
             existing = 2
         if existing == 2:
             self.migrate_v2_to_v3()
+            existing = 3
+        if existing == 3:
+            self.migrate_v3_to_v4()
         self.db.execute(
             "INSERT OR REPLACE INTO metadata(key,value) VALUES ('database_schema_version',?)",
             (str(DATABASE_SCHEMA_VERSION),),
@@ -201,7 +204,10 @@ class HistoryStore:
             "short_term_setup",
         ]
         self.db.executemany(
-            f"INSERT OR REPLACE INTO ranking_history VALUES ({','.join('?' * 10)})",
+            """INSERT OR REPLACE INTO ranking_history(
+            run_id,run_timestamp,symbol,long_term_score,long_term_rank,
+            short_term_score,short_term_rank,risk_score,confidence_score,short_term_setup
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
             [
                 [run_id, timestamp, row["symbol"]] + [row.get(key) for key in keys]
                 for row in rows
@@ -210,7 +216,9 @@ class HistoryStore:
         self.db.commit()
 
     def save_predictions(self, run_id: str, timestamp: str, model_version: str,
-                         rows: list[dict[str, Any]]) -> None:
+                         rows: list[dict[str, Any]], lt_run_status: str = "VALID",
+                         st_run_status: str = "VALID",
+                         overall_run_status: str = "VALID") -> None:
         """Idempotently save scores as observed; outcome updates never recompute them."""
         keys = [
             "long_term_score", "long_term_rank", "short_term_score", "short_term_rank",
@@ -222,8 +230,17 @@ class HistoryStore:
         ]
         with self.db:
             self.db.executemany(
-                f"INSERT OR IGNORE INTO prediction_snapshots VALUES ({','.join('?' * 26)})",
-                [[run_id, timestamp, row["symbol"], model_version] + [row.get(k) for k in keys] for row in rows],
+                """INSERT OR IGNORE INTO prediction_snapshots(
+                run_id,run_timestamp,symbol,model_version,long_term_score,long_term_rank,
+                short_term_score,short_term_rank,risk_score,confidence_score,short_term_setup,
+                price_at_prediction,benchmark_price_at_prediction,index_name,sector,quality_score,
+                growth_score,valuation_score,expectations_score,trend_score,setup_quality_score,
+                short_expectations_score,volume_score,price_as_of_utc,benchmark_symbol,
+                benchmark_price_as_of_utc,lt_run_status,st_run_status,overall_run_status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [[run_id, timestamp, row["symbol"], model_version] +
+                 [row.get(k) for k in keys] +
+                 [lt_run_status, st_run_status, overall_run_status] for row in rows],
             )
             self.db.executemany(
                 "INSERT OR IGNORE INTO prediction_outcomes(run_id,symbol) VALUES (?,?)",
@@ -234,6 +251,13 @@ class HistoryStore:
         """Add immutable stock/benchmark baseline identity without rewriting snapshots."""
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")}
         for name in ("price_as_of_utc", "benchmark_symbol", "benchmark_price_as_of_utc"):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT")
+
+    def migrate_v3_to_v4(self) -> None:
+        """Record horizon health so validation can exclude unusable predictions."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")}
+        for name in ("lt_run_status", "st_run_status", "overall_run_status"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT")
 
@@ -249,3 +273,9 @@ class HistoryStore:
 
     def close(self) -> None:
         self.db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()

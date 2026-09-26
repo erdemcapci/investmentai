@@ -89,15 +89,21 @@ def validation_report(connection: sqlite3.Connection) -> dict:
         rank_column = "short_term_rank" if horizon in {"5d", "10d", "20d"} else "long_term_rank"
         return_column = f"forward_{horizon}_return"
         valid = frame.dropna(subset=[score_column, return_column]) if len(frame) else frame
+        status_column = "st_run_status" if horizon in {"5d", "10d", "20d"} else "lt_run_status"
+        if len(valid) and status_column in valid:
+            valid = valid[valid[status_column].isin(["VALID", "DEGRADED"])]
         summary = {"N": len(valid), "status": sample_status(len(valid))}
         if len(valid):
             excess_column = f"excess_forward_{horizon}_return"
             excess = valid[excess_column].dropna()
+            correlation = None
+            if valid[score_column].nunique() > 1 and valid[return_column].nunique() > 1:
+                correlation = valid[score_column].corr(valid[return_column], method="spearman")
             summary.update({
                 "mean": valid[return_column].mean(), "median": valid[return_column].median(),
                 "standard_deviation": valid[return_column].std(),
                 "win_rate": valid[return_column].gt(0).mean(),
-                "rank_correlation": valid[score_column].corr(valid[return_column], method="spearman"),
+                "rank_correlation": correlation,
                 "top": {str(n): valid.nsmallest(n, rank_column)[return_column].median() for n in (10, 25, 50)},
                 "mean_excess_return": excess.mean() if len(excess) else None,
                 "median_excess_return": excess.median() if len(excess) else None,

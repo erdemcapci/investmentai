@@ -172,6 +172,7 @@ class YahooClient:
         result["earnings_dates_success"] = date_status in {FRESH_PROVIDER, FRESH_CACHE}
         result["earnings_dates_cache_status"] = date_status
         result["earnings_dates_fetched_at_utc"] = dates.get("fetched_at_utc")
+        result["earnings_dates_error_message"] = str(dates.get("error", ""))[:1000] or None
         component_statuses.append(date_status)
         if dates.get("fetched_at_utc"):
             fetched_times.append(dates["fetched_at_utc"])
@@ -192,6 +193,10 @@ class YahooClient:
         result["current_price_provider"] = info_data.get(
             "currentPrice", info_data.get("regularMarketPrice")
         )
+        result["info_success"] = info_status in {FRESH_PROVIDER, FRESH_CACHE}
+        result["info_cache_status"] = info_status
+        result["info_fetched_at_utc"] = info.get("fetched_at_utc")
+        result["info_error_message"] = str(info.get("error", ""))[:1000] or None
         component_statuses.append(info_status)
         result["analyst_fetched_at_utc"] = max(fetched_times) if fetched_times else None
         # An unusable component must never be hidden by a usable stale component.
