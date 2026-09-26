@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.2 — runtime hardening
+
+- Upgraded the GitHub-maintained checkout and Python setup actions to their Node 24
+  majors. The v1.0.1 baseline was green (126 tests plus compile, Ruff, and whitespace);
+  the visible messages were action-runtime deprecation warnings, not application failures.
+- Made every JSON artifact strict and scientific-data safe by recursively mapping missing
+  and non-finite values to JSON `null` while retaining `allow_nan=False`.
+- Added health-gated prediction persistence and database schema 4 horizon-status metadata;
+  validation excludes INVALID horizons while retaining VALID and DEGRADED observations.
+- Added deterministic scoring-code fingerprints, mandatory frozen-artifact checksums for
+  exact replay, and collision-resistant replay/rescore child run IDs.
+- Clarified provider capture versus usability, expanded component error telemetry, removed
+  the misleading parse-empty metric, guaranteed SQLite cleanup, and added a compact run
+  summary. Scoring model 3.1.1 and all published scoring weights remain unchanged.
+
 ## v1.0.1 — stabilization
 
 - Repaired GitHub CI packaging and made Python 3.12 the sole supported runtime.

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import numpy as np
 
 from investment_ai.config import (
     APPLICATION_VERSION, CACHE_SCHEMA_VERSION, DATABASE_SCHEMA_VERSION,
@@ -28,11 +29,61 @@ ERROR_COLUMNS = [
 ]
 
 
+SCORING_CODE_PATHS = (
+    "investment_ai/config.py",
+    "investment_ai/pipeline.py",
+    "investment_ai/scoring/common.py",
+    "investment_ai/scoring/long_term.py",
+    "investment_ai/scoring/short_term.py",
+    "investment_ai/scoring/ranking.py",
+    "investment_ai/features/analyst.py",
+    "investment_ai/features/fundamentals.py",
+    "investment_ai/features/valuation.py",
+    "investment_ai/features/technical.py",
+    "investment_ai/features/risk.py",
+    "investment_ai/features/peers.py",
+)
+
+
+def to_json_safe(value: Any) -> Any:
+    """Recursively convert common scientific Python values to strict JSON values."""
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return None if pd.isna(value) else value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        numeric = float(value)
+        return numeric if np.isfinite(numeric) else None
+    if isinstance(value, dict):
+        return {str(key): to_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        items = sorted(value, key=repr) if isinstance(value, set) else value
+        return [to_json_safe(item) for item in items]
+    return value
+
+
+def scoring_code_fingerprint(root: Path | None = None) -> str:
+    """Hash scoring semantics with stable path ordering and path boundaries."""
+    root = root or Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for relative in sorted(SCORING_CODE_PATHS):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update((root / relative).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, indent=2, default=str, allow_nan=False)
+        json.dump(to_json_safe(value), handle, indent=2, allow_nan=False)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
@@ -138,7 +189,8 @@ class RunContext:
     started: datetime
     checkpoint: dict[str, Any] = field(default_factory=lambda: {
         "universe_loaded": False, "prices_complete": False,
-        "provider_symbols_complete": [], "provider_symbols_failed": [],
+        "provider_symbols_complete": [], "provider_symbols_usable": [],
+        "provider_symbols_failed": [],
         "analysis_complete": False, "history_saved": False, "exports_complete": False,
     })
     errors: list[dict[str, Any]] = field(default_factory=list)
@@ -183,7 +235,7 @@ class RunContext:
                 "scoring_model_version": SCORING_MODEL_VERSION,
                 "cache_schema_version": CACHE_SCHEMA_VERSION,
                 "database_schema_version": DATABASE_SCHEMA_VERSION,
-                "provider_complete": False, "outcomes_updated": False,
+                "provider_capture_complete": False, "outcomes_updated": False,
                 "manifest_complete": False,
             })
             context.save_checkpoint()
@@ -212,7 +264,10 @@ class RunContext:
 
 def build_manifest(context: RunContext, metrics: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     finished = datetime.now(timezone.utc)
+    # Persist the incomplete state first so a failed atomic manifest replacement is resumable.
+    context.checkpoint["manifest_complete"] = False
     context.checkpoint["run_finished_at_utc"] = finished.isoformat()
+    context.save_checkpoint()
     sha, dirty = _git_metadata()
     dependencies = {}
     for package in ("yfinance", "pandas", "numpy"):
@@ -227,6 +282,7 @@ def build_manifest(context: RunContext, metrics: dict[str, Any], config: dict[st
         "duration_seconds": round((finished - context.started).total_seconds(), 3),
         "application_version": APPLICATION_VERSION,
         "scoring_model_version": SCORING_MODEL_VERSION,
+        "scoring_code_fingerprint": scoring_code_fingerprint(),
         "analysis_as_of_utc": context.checkpoint.get("analysis_as_of_utc"),
         "cache_schema_version": CACHE_SCHEMA_VERSION,
         "database_schema_version": DATABASE_SCHEMA_VERSION,

@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-APPLICATION_VERSION = "1.0.1"
+APPLICATION_VERSION = "1.0.2"
 SCORING_MODEL_VERSION = "3.1.1"
-DATABASE_SCHEMA_VERSION = 3
+DATABASE_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 3
 TOP_N = int(os.getenv("TOP_N", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))

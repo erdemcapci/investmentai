@@ -31,6 +31,7 @@ from investment_ai.reporting.export import export_run
 from investment_ai.reporting.tables import print_rankings
 from investment_ai.runtime import (
     RunContext, atomic_csv, build_manifest, configure_logging, horizon_run_statuses,
+    scoring_code_fingerprint,
 )
 from investment_ai.status import ERROR, FRESH_CACHE, FRESH_PROVIDER, PARTIAL, STALE_FALLBACK
 
@@ -93,27 +94,35 @@ def _provider_data(context: RunContext, universe: pd.DataFrame, logger) -> pd.Da
     prior = _read(path) if path.exists() else pd.DataFrame()
     artifact_symbols = set(prior.symbol.astype(str)) if len(prior) and "symbol" in prior else set()
     # The artifact is the durable truth; a checkpoint cannot claim an absent row.
-    complete = set(context.checkpoint["provider_symbols_complete"]) & artifact_symbols
-    context.checkpoint["provider_symbols_complete"] = sorted(complete)
-    # Failed symbols are intentionally absent from complete and retried on resume.
-    pending = universe[~universe.symbol.isin(complete)]
+    captured = artifact_symbols
+    prior_success = pd.to_numeric(
+        prior.get("provider_success", pd.Series(0, index=prior.index)), errors="coerce"
+    ).gt(0)
+    usable = set(prior.loc[prior_success, "symbol"].astype(str)) if len(prior) else set()
+    context.checkpoint["provider_symbols_complete"] = sorted(captured)  # legacy resume key
+    context.checkpoint["provider_symbols_usable"] = sorted(usable)
+    pending = universe[~universe.symbol.isin(captured)]
+    total_batches = (len(pending) + 24) // 25
     for offset in range(0, len(pending), 25):
         batch = pending.iloc[offset:offset + 25]
-        logger.info("provider fetch start symbols=%d", len(pending))
+        batch_number = offset // 25 + 1
+        logger.info("provider batch %d/%d size=%d remaining=%d", batch_number, total_batches,
+                    len(batch), max(0, len(pending) - offset - len(batch)))
         fresh = YahooClient(JsonCache(CACHE_DIR)).fetch_many(batch)
         prior = pd.concat([prior[~prior.symbol.isin(fresh.symbol)] if len(prior) else prior, fresh], ignore_index=True)
         success = pd.to_numeric(
             fresh.get("provider_success", pd.Series(1, index=fresh.index)), errors="coerce"
         ).gt(0)
-        complete_now = fresh.loc[success, "symbol"].tolist()
-        failed_now = fresh.loc[~fresh.symbol.isin(complete_now), "symbol"].tolist()
-        context.checkpoint["provider_symbols_complete"] = sorted(complete | set(complete_now))
-        context.checkpoint["provider_symbols_failed"] = sorted(failed_now)
+        usable_now = set(fresh.loc[success, "symbol"].tolist())
+        captured_now = set(fresh.symbol.tolist())
+        captured.update(captured_now)
+        usable.update(usable_now)
+        context.checkpoint["provider_symbols_complete"] = sorted(captured)
+        context.checkpoint["provider_symbols_usable"] = sorted(usable)
+        context.checkpoint["provider_symbols_failed"] = sorted(captured - usable)
         atomic_csv(prior, path)
         context.save_checkpoint()
-        logger.info("provider fetch end complete=%d failed=%d", len(complete_now), len(failed_now))
-        complete.update(complete_now)
-    context.checkpoint["provider_complete"] = set(universe.symbol) <= set(prior.get("symbol", []))
+    context.checkpoint["provider_capture_complete"] = set(universe.symbol) <= captured
     context.save_checkpoint()
     return prior
 
@@ -130,13 +139,40 @@ def _verify_source(source: Path, exact: bool) -> dict:
         raise RuntimeError(f"Source run is missing required artifacts: {', '.join(missing)}")
     manifest = json.loads((source / "run_manifest.json").read_text())
     if exact and manifest.get("scoring_model_version") != SCORING_MODEL_VERSION:
-        raise RuntimeError("Exact replay requires the source scoring model version")
+        raise RuntimeError("Exact replay requires the current scoring model version; use --rescore")
     if exact:
-        for name, digest in manifest.get("artifact_sha256", {}).items():
+        fingerprint = manifest.get("scoring_code_fingerprint")
+        if not fingerprint:
+            raise RuntimeError("Legacy source has no scoring fingerprint; use --rescore")
+        if fingerprint != scoring_code_fingerprint():
+            raise RuntimeError("Exact replay scoring implementation differs; use --rescore")
+        checksums = manifest.get("artifact_sha256", {})
+        missing_hashes = [name for name in required[1:] if not checksums.get(name)]
+        if missing_hashes:
+            raise RuntimeError("Exact replay requires artifact checksums for: " +
+                               ", ".join(missing_hashes) + "; use --rescore")
+        for name in required[1:]:
+            digest = checksums[name]
             actual = hashlib.sha256((source / name).read_bytes()).hexdigest()
             if actual != digest:
                 raise RuntimeError(f"Exact replay artifact checksum mismatch: {name}")
     return manifest
+
+
+def _persistence_rows(full: pd.DataFrame, health: dict[str, str]) -> list[dict]:
+    """Return a health-gated copy; diagnostic exports retain the original scores."""
+    if health["lt_run_status"] == health["st_run_status"] == "INVALID":
+        return []
+    persisted = full.copy()
+    if health["lt_run_status"] == "INVALID":
+        persisted[["long_term_score", "long_term_rank"]] = np.nan
+    if health["st_run_status"] == "INVALID":
+        persisted[["short_term_score", "short_term_rank"]] = np.nan
+        if "short_term_setup" in persisted:
+            persisted["short_term_setup"] = None
+    return persisted[
+        persisted.long_term_rank.notna() | persisted.short_term_rank.notna()
+    ].to_dict("records")
 
 
 def execute(run_id: str | None = None, resume: bool = False, replay: bool = False,
@@ -150,7 +186,8 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
             raise FileNotFoundError(f"Replay run not found: {run_id}")
         source_manifest = _verify_source(source, exact=replay)
         suffix = "replay" if replay else "rescore"
-        context = RunContext.create(f"{run_id}-{suffix}", RUNS_DIR)
+        child_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        context = RunContext.create(f"{run_id}-{suffix}-{child_timestamp}", RUNS_DIR)
     else:
         run_id = run_id or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
         context = RunContext.create(str(run_id), RUNS_DIR, resume=resume)
@@ -159,6 +196,7 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
     logger.info("run start application=%s model=%s mode=%s", APPLICATION_VERSION, SCORING_MODEL_VERSION,
                 "replay" if replay else "rescore" if rescore else "resume" if resume else "normal")
     timings: dict[str, float] = {}
+    store = None
     try:
         start = time.monotonic()
         if frozen_mode or context.checkpoint["universe_loaded"]:
@@ -251,17 +289,17 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
                             ("stale_fallback_count", STALE_FALLBACK), ("partial_count", PARTIAL),
                             ("error_count", ERROR)):
             metrics[name] = int(statuses.eq(value).sum().sum())
-        for component in YahooClient.ANALYST_COMPONENTS:
+        for component in (*YahooClient.ANALYST_COMPONENTS, "earnings_dates", "info",
+                          "valuation", "fundamental"):
             component_status = provider.get(
                 f"{component}_cache_status", pd.Series("", index=provider.index)
             ).astype(str)
             metrics[f"provider_contract_{component}"] = {
-                "success_count": int(component_status.isin([FRESH_PROVIDER, FRESH_CACHE]).sum()),
-                "parse_empty_count": int(provider.get(
-                    f"{component}_success", pd.Series(False, index=provider.index)
-                ).eq(False).sum()),
+                "fresh_provider_count": int(component_status.eq(FRESH_PROVIDER).sum()),
+                "fresh_cache_count": int(component_status.eq(FRESH_CACHE).sum()),
                 "error_count": int(component_status.eq(ERROR).sum()),
                 "stale_fallback_count": int(component_status.eq(STALE_FALLBACK).sum()),
+                "usable_count": int(component_status.ne(ERROR).sum()),
             }
         for prefix, column in (("lt_score", "long_term_score"), ("st_score", "short_term_score")):
             numeric = pd.to_numeric(full.get(column), errors="coerce").dropna()
@@ -299,7 +337,8 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
         for row in provider[provider.get("data_errors", pd.Series("", index=provider.index)).fillna("").ne("")].to_dict("records"):
             context.record_error(row["symbol"], "ANALYST", "yahoo", row.get("data_errors"))
         for row in provider.to_dict("records"):
-            for component in (*YahooClient.ANALYST_COMPONENTS, "valuation", "fundamental"):
+            for component in (*YahooClient.ANALYST_COMPONENTS, "earnings_dates", "info",
+                              "valuation", "fundamental"):
                 if row.get(f"{component}_cache_status") == ERROR:
                     stage = "ANALYST" if component in YahooClient.ANALYST_COMPONENTS else component.upper()
                     context.record_error(row["symbol"], stage, component,
@@ -317,10 +356,16 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
         outcomes_updated = 0
         outcome_start = time.monotonic()
         if not frozen_mode and not context.checkpoint["history_saved"]:
-            ranked = full[full.long_term_rank.notna() | full.short_term_rank.notna()].to_dict("records")
-            store.save_rankings(context.run_id, analysis_as_of.isoformat(), ranked)
-            store.save_predictions(context.run_id, analysis_as_of.isoformat(), SCORING_MODEL_VERSION, ranked)
+            ranked = _persistence_rows(full, health_details)
+            if ranked:
+                store.save_rankings(context.run_id, analysis_as_of.isoformat(), ranked)
+                store.save_predictions(
+                    context.run_id, analysis_as_of.isoformat(), SCORING_MODEL_VERSION, ranked,
+                    health_details["lt_run_status"], health_details["st_run_status"],
+                    health_details["overall_run_status"],
+                )
             context.checkpoint["history_saved"] = True
+            context.save_checkpoint()
         if not frozen_mode and downloaded is not None:
             from investment_ai.validation import update_outcomes
             symbols = universe.symbol.tolist()
@@ -336,7 +381,6 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
         metrics["outcomes_updated_count"] = outcomes_updated
         context.checkpoint["exports_complete"] = True
         context.save_checkpoint()
-        store.close()
         config = {"force_refresh": FORCE_REFRESH, "export_results": EXPORT_RESULTS,
                   "max_workers": MAX_WORKERS, "price_batch_size": PRICE_BATCH_SIZE,
                   "minimum_peers": MIN_PEERS, "top_n": TOP_N, "price_period": PRICE_PERIOD}
@@ -344,11 +388,12 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
                         "max_workers": MAX_WORKERS, "price_batch_size": PRICE_BATCH_SIZE,
                         "minimum_peers": MIN_PEERS,
                         "replay_mode": "EXACT_COMPATIBLE" if replay else "RESCORE" if rescore else "NORMAL",
+                        "mode": "replay" if replay else "rescore" if rescore else "normal",
                         "source_run_id": run_id if frozen_mode else None,
                         "source_application_version": source_manifest.get("application_version") if frozen_mode else None,
                         "source_scoring_model_version": source_manifest.get("scoring_model_version") if frozen_mode else None,
                         "total_duration_seconds": round((datetime.now(timezone.utc) - context.started).total_seconds(), 3)})
-        manifest = build_manifest(context, metrics, config)
+        build_manifest(context, metrics, config)
         logger.info("run health status=%s reasons=%s", health, reasons)
         if health_details["lt_run_status"] == "INVALID" and health_details["st_run_status"] == "INVALID":
             print("\nINVALID RUN — rankings suppressed; see run_manifest.json and errors.csv")
@@ -358,7 +403,18 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
             print("\n*** DEGRADED RUN — review coverage warnings before use ***")
         print_rankings(long_term if health_details["lt_run_status"] != "INVALID" else long_term.iloc[0:0],
                        short_term if health_details["st_run_status"] != "INVALID" else short_term.iloc[0:0], TOP_N)
-        print(f"\nArtifacts: {context.directory}\nRun status: {manifest['run_status']}")
+        print(f"""\nApplication: {APPLICATION_VERSION}
+Scoring model: {SCORING_MODEL_VERSION}
+Run ID: {context.run_id}
+Analysis as-of: {context.checkpoint.get('analysis_as_of_utc')}
+Common status: {health_details['common_run_status']}
+LT status: {health_details['lt_run_status']}
+ST status: {health_details['st_run_status']}
+Universe: {metrics['universe_count']} | LT ranked: {metrics['lt_ranked_count']} | ST ranked: {metrics['st_ranked_count']}
+Price coverage: {metrics['price_coverage_pct']:.1f}% | Quality coverage: {metrics['quality_coverage_pct']:.1f}% | Growth coverage: {metrics['growth_coverage_pct']:.1f}%
+Valuation coverage: {metrics['valuation_coverage_pct']:.1f}% | Long Expectations: {metrics['long_expectations_coverage_pct']:.1f}% | Short Expectations: {metrics['short_expectations_coverage_pct']:.1f}%
+Provider errors: {metrics['provider_error_symbol_count']} | Stale fallbacks: {metrics['stale_fallback_count']} | Outcome rows updated: {outcomes_updated}
+Artifacts: {context.directory}""")
         logger.info("run end")
         return 0
     except Exception as exc:
@@ -381,6 +437,9 @@ def execute(run_id: str | None = None, resume: bool = False, replay: bool = Fals
         }, {"fatal": True})
         logger.exception("fatal run exception")
         raise
+    finally:
+        if store is not None:
+            store.close()
 
 
 def main(argv: list[str] | None = None) -> int:
