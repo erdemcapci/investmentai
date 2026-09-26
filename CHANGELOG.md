@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3
+
+- Renamed the generated benchmark assignment metadata field from
+  `benchmark_method` to the persisted `benchmark_assignment_method` contract.
+- Explicitly record `benchmark_return_basis` as `ADJUSTED_CLOSE_RETURN` for every
+  benchmark assignment.
+
 ## 1.1.2
 
 - Froze the 3.1.2 scoring implementation with unchanged published weights and
