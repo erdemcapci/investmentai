@@ -210,7 +210,11 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
             if pd.isna(pull) and pd.isna(breakout_score)
             else safe_nanmean([pull, breakout_score])
         )
-    status = "INSUFFICIENT_DATA" if pd.isna(quality) else "RANKED"
+    status = (
+        "INSUFFICIENT_DATA"
+        if pd.isna(quality)
+        else "RANKED" if setup != "NONE" else "NO_CREDIBLE_SETUP"
+    )
     return {
         "pullback_setup_score": pull,
         "breakout_momentum_setup_score": breakout_score,

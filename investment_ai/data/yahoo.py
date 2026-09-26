@@ -3,6 +3,7 @@
 from __future__ import annotations
 import random
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 import numpy as np
@@ -34,6 +35,21 @@ from investment_ai.features.valuation import parse_valuation
 RATE_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
 
 
+def aggregate_component_status(statuses: list[str]) -> str:
+    """Summarize component health with errors taking precedence over staleness."""
+    if not statuses or all(value in {ERROR, "INSUFFICIENT"} for value in statuses):
+        return ERROR
+    if any(value == ERROR for value in statuses):
+        return PARTIAL
+    if any(value == STALE_FALLBACK for value in statuses):
+        return STALE_FALLBACK
+    if any(value == PARTIAL for value in statuses):
+        return PARTIAL
+    if any(value == FRESH_PROVIDER for value in statuses):
+        return FRESH_PROVIDER
+    return FRESH_CACHE
+
+
 def call_with_retry(function: Callable[[], Any], attempts: int = 3) -> Any:
     error = None
     for attempt in range(attempts):
@@ -46,6 +62,10 @@ def call_with_retry(function: Callable[[], Any], attempts: int = 3) -> Any:
                     marker in str(exc).lower() for marker in RATE_MARKERS
                 )
                 delays = (5, 15, 30) if rate_limited else (0.5, 1, 2)
+                logging.getLogger("investment_ai").warning(
+                    "%s retry attempt=%d", "rate limit" if rate_limited else "provider",
+                    attempt + 1, extra={"symbol": "-", "component": "yahoo"},
+                )
                 time.sleep(delays[attempt] + random.uniform(0, 0.25 * delays[attempt]))
     raise error
 
@@ -173,19 +193,8 @@ class YahooClient:
         )
         component_statuses.append(info_status)
         result["analyst_fetched_at_utc"] = max(fetched_times) if fetched_times else None
-        result["analyst_cache_status"] = (
-            STALE_FALLBACK
-            if any(status == STALE_FALLBACK for status in component_statuses)
-            else (
-                PARTIAL
-                if any(status == ERROR for status in component_statuses)
-                else (
-                    FRESH_PROVIDER
-                    if any(status == FRESH_PROVIDER for status in component_statuses)
-                    else FRESH_CACHE
-                )
-            )
-        )
+        # An unusable component must never be hidden by a usable stale component.
+        result["analyst_cache_status"] = aggregate_component_status(component_statuses)
 
         valuation, valuation_status = self.cache.get_or_fetch(
             "valuation",

@@ -64,5 +64,11 @@ def weighted(
 
 def percentile(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
     numeric = pd.to_numeric(series, errors="coerce")
-    result = numeric.rank(pct=True, method="average") * 100
+    count = numeric.notna().sum()
+    result = pd.Series(np.nan, index=series.index, dtype=float)
+    if count == 1:
+        result.loc[numeric.notna()] = 50.0
+    elif count > 1:
+        ranks = numeric.rank(method="average")
+        result = (ranks - 1) / (count - 1) * 100
     return result if higher_is_better else 100 - result

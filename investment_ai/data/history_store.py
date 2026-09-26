@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 import pandas as pd
+from investment_ai.config import DATABASE_SCHEMA_VERSION
 
 SNAPSHOT_FIELDS = [
     "target_low",
@@ -46,9 +47,18 @@ class HistoryStore:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self._schema()
 
     def _schema(self) -> None:
+        self.db.execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        row = self.db.execute("SELECT value FROM metadata WHERE key='database_schema_version'").fetchone()
+        existing = int(row[0]) if row else 1
+        if existing > DATABASE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Unsupported future database schema {existing}; application supports {DATABASE_SCHEMA_VERSION}"
+            )
         columns = ", ".join(f"{field} REAL" for field in SNAPSHOT_FIELDS)
         self.db.execute(
             f"CREATE TABLE IF NOT EXISTS analyst_snapshots(snapshot_date TEXT NOT NULL,fetched_at_utc TEXT NOT NULL,symbol TEXT NOT NULL,{columns},UNIQUE(fetched_at_utc,symbol))"
@@ -59,7 +69,36 @@ class HistoryStore:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS ranking_history(run_id TEXT,run_timestamp TEXT,symbol TEXT,long_term_score REAL,long_term_rank INTEGER,short_term_score REAL,short_term_rank INTEGER,risk_score REAL,confidence_score REAL,short_term_setup TEXT,UNIQUE(run_id,symbol))"
         )
+        if existing == 1:
+            self.migrate_v1_to_v2()
+        self.db.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES ('database_schema_version',?)",
+            (str(DATABASE_SCHEMA_VERSION),),
+        )
         self.db.commit()
+
+    def migrate_v1_to_v2(self) -> None:
+        """Add point-in-time prediction and outcome storage; legacy snapshots remain archival."""
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS prediction_snapshots(
+            run_id TEXT NOT NULL,run_timestamp TEXT NOT NULL,symbol TEXT NOT NULL,
+            model_version TEXT,long_term_score REAL,long_term_rank INTEGER,
+            short_term_score REAL,short_term_rank INTEGER,risk_score REAL,
+            confidence_score REAL,short_term_setup TEXT,price_at_prediction REAL,
+            benchmark_price_at_prediction REAL,index_name TEXT,sector TEXT,
+            quality_score REAL,growth_score REAL,valuation_score REAL,
+            expectations_score REAL,trend_score REAL,setup_quality_score REAL,
+            short_expectations_score REAL,volume_score REAL,
+            PRIMARY KEY(run_id,symbol))"""
+        )
+        columns = ",".join(
+            f"{prefix}_{horizon}_return REAL"
+            for horizon in ("5d", "10d", "20d", "3m", "6m", "12m")
+            for prefix in ("forward", "benchmark_forward", "excess_forward")
+        )
+        self.db.execute(
+            f"CREATE TABLE IF NOT EXISTS prediction_outcomes(run_id TEXT NOT NULL,symbol TEXT NOT NULL,{columns},PRIMARY KEY(run_id,symbol),FOREIGN KEY(run_id,symbol) REFERENCES prediction_snapshots(run_id,symbol))"
+        )
 
     def upsert_analyst(
         self, symbol: str, data: dict[str, Any], when: datetime | None = None
@@ -165,6 +204,26 @@ class HistoryStore:
             ],
         )
         self.db.commit()
+
+    def save_predictions(self, run_id: str, timestamp: str, model_version: str,
+                         rows: list[dict[str, Any]]) -> None:
+        """Idempotently save scores as observed; outcome updates never recompute them."""
+        keys = [
+            "long_term_score", "long_term_rank", "short_term_score", "short_term_rank",
+            "risk_score", "confidence_score", "short_term_setup", "current_price",
+            "benchmark_price", "index_name", "sector", "quality_score", "growth_score",
+            "valuation_score", "expectations_long_score", "long_trend_score",
+            "setup_quality_score", "expectations_short_score", "volume_confirmation_score",
+        ]
+        with self.db:
+            self.db.executemany(
+                f"INSERT OR IGNORE INTO prediction_snapshots VALUES ({','.join('?' * 23)})",
+                [[run_id, timestamp, row["symbol"], model_version] + [row.get(k) for k in keys] for row in rows],
+            )
+            self.db.executemany(
+                "INSERT OR IGNORE INTO prediction_outcomes(run_id,symbol) VALUES (?,?)",
+                [(run_id, row["symbol"]) for row in rows],
+            )
 
     def changes(self, symbol: str, days: int = 7, as_of: datetime | None = None):
         cutoff = (

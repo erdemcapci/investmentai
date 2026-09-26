@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 import json
+import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from investment_ai.status import ERROR, FRESH_CACHE, FRESH_PROVIDER, STALE_FALLBACK
 
-CURRENT_CACHE_SCHEMA_VERSION = 2
+CURRENT_CACHE_SCHEMA_VERSION = 3
 
 
 class JsonCache:
@@ -60,6 +62,12 @@ class JsonCache:
             and isinstance(old.get("data"), dict)
             and (validator is None or validator(old.get("data", {})))
         )
+        if old and not old_valid:
+            logging.getLogger("investment_ai").warning(
+                "cache invalidated tier=%s symbol=%s schema=%s",
+                tier, symbol, old.get("cache_schema_version"),
+                extra={"symbol": symbol, "component": tier},
+            )
         if not force and old_valid and self.fresh(old, ttl_hours):
             return old, FRESH_CACHE
         try:
@@ -75,10 +83,17 @@ class JsonCache:
             path, temporary = self._path(tier, symbol), self._path(
                 tier, symbol
             ).with_suffix(".tmp")
-            temporary.write_text(json.dumps(item, default=str))
+            with temporary.open("w") as handle:
+                json.dump(item, handle, default=str)
+                handle.flush()
+                os.fsync(handle.fileno())
             temporary.replace(path)
             return item, FRESH_PROVIDER
         except Exception as exc:
             if old_valid:
+                logging.getLogger("investment_ai").warning(
+                    "cache stale fallback: %s", str(exc)[:300],
+                    extra={"symbol": symbol, "component": tier},
+                )
                 return old, STALE_FALLBACK
             return {"cache_schema_version": CURRENT_CACHE_SCHEMA_VERSION, "fetched_at_utc": None, "data": {}, "error": str(exc)}, ERROR

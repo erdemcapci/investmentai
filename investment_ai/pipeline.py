@@ -15,6 +15,7 @@ from investment_ai.status import (
     STALE_FALLBACK,
 )
 from investment_ai.features.technical import add_relative_strength
+from investment_ai.features.benchmark import add_benchmark_relative_strength
 from investment_ai.features.valuation import add_peer_percentiles
 from investment_ai.scoring.common import curve, weighted
 from investment_ai.scoring.long_term import score_long_term
@@ -48,6 +49,25 @@ def normalize_sector(value):
     if pd.isna(value):
         return np.nan
     return SECTOR_MAP.get(str(value).strip().lower(), str(value).strip())
+
+
+def target_metrics(frame: pd.DataFrame) -> pd.DataFrame:
+    """Calculate upside independently; only dispersion requires a valid range."""
+    selected = frame.get("target_median", pd.Series(np.nan, index=frame.index)).where(
+        frame.get("target_median", pd.Series(np.nan, index=frame.index)) > 0
+    ).combine_first(frame.get("target_mean", pd.Series(np.nan, index=frame.index)).where(
+        frame.get("target_mean", pd.Series(np.nan, index=frame.index)) > 0
+    ))
+    low = pd.to_numeric(frame.get("target_low", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    high = pd.to_numeric(frame.get("target_high", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    price = pd.to_numeric(frame.get("current_price", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    valid_range = low.notna() & high.notna() & low.le(high)
+    return pd.DataFrame({
+        "selected_target": selected,
+        "target_range_valid": valid_range,
+        "target_upside_pct": np.where(selected.gt(0) & price.gt(0), (selected / price - 1) * 100, np.nan),
+        "target_dispersion_pct": np.where(valid_range & selected.gt(0), (high - low) / selected.abs() * 100, np.nan),
+    }, index=frame.index)
 
 
 def _history_scores_v31(row):
@@ -146,29 +166,10 @@ def build_analysis(
     frame["sector_source"] = np.where(yahoo.notna(), "YAHOO", "CONSTITUENT")
     frame["sector_normalization_method"] = "CANONICAL_MAP"
     frame["sector"] = frame["sector_normalized"]
-    selected = (
-        frame.get("target_median", pd.Series(np.nan, index=frame.index))
-        .where(frame.get("target_median", pd.Series(np.nan, index=frame.index)) > 0)
-        .combine_first(
-            frame.get("target_mean", pd.Series(np.nan, index=frame.index)).where(
-                frame.get("target_mean", pd.Series(np.nan, index=frame.index)) > 0
-            )
-        )
-    )
-    valid_range = frame.get("target_low", pd.Series(np.nan, index=frame.index)).le(
-        frame.get("target_high", pd.Series(np.nan, index=frame.index))
-    )
-    frame["target_range_valid"] = valid_range
-    frame["target_upside_pct"] = np.where(
-        valid_range & selected.gt(0) & frame.current_price.gt(0),
-        (selected / frame.current_price - 1) * 100,
-        np.nan,
-    )
-    frame["target_dispersion_pct"] = np.where(
-        valid_range & selected.gt(0),
-        (frame.target_high - frame.target_low) / selected.abs() * 100,
-        np.nan,
-    )
+    targets = target_metrics(frame)
+    frame[["target_range_valid", "target_upside_pct", "target_dispersion_pct"]] = targets[
+        ["target_range_valid", "target_upside_pct", "target_dispersion_pct"]
+    ]
     provider_price = pd.to_numeric(frame.get("current_price_provider", pd.Series(np.nan, index=frame.index)), errors="coerce")
     completed_price = pd.to_numeric(frame.get("current_price", pd.Series(np.nan, index=frame.index)), errors="coerce")
     frame["provider_price_vs_last_completed_close_pct"] = np.where(
@@ -202,6 +203,7 @@ def build_analysis(
         },
     )
     frame = add_relative_strength(frame)
+    frame = add_benchmark_relative_strength(frame)
     frame = pd.concat(
         [
             frame.reset_index(drop=True),

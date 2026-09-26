@@ -1,5 +1,6 @@
 from __future__ import annotations
 import time
+import logging
 import pandas as pd
 import yfinance as yf
 from investment_ai.config import PRICE_BATCH_SIZE, PRICE_DOWNLOAD_ATTEMPTS
@@ -7,6 +8,8 @@ from investment_ai.features.technical import price_features
 
 
 def _download_chunk(symbols: list[str], period: str) -> pd.DataFrame:
+    logger = logging.getLogger("investment_ai")
+    logger.info("price chunk start size=%d", len(symbols), extra={"symbol": "-", "component": "price"})
     for attempt in range(PRICE_DOWNLOAD_ATTEMPTS):
         try:
             value = yf.download(tickers=symbols, period=period, interval="1d",
@@ -16,9 +19,12 @@ def _download_chunk(symbols: list[str], period: str) -> pd.DataFrame:
                     value = pd.concat({symbols[0]: value}, axis=1)
                 return value
             raise ValueError("empty price response")
-        except Exception:
+        except Exception as exc:
             if attempt + 1 < PRICE_DOWNLOAD_ATTEMPTS:
+                logger.warning("price retry attempt=%d error=%s", attempt + 1, str(exc)[:300],
+                               extra={"symbol": "-", "component": "price"})
                 time.sleep(.25 * (2 ** attempt))
+    logger.error("price chunk failed size=%d", len(symbols), extra={"symbol": "-", "component": "price"})
     return pd.DataFrame()
 
 
