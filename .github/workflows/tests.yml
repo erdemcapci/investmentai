@@ -6,9 +6,6 @@ on:
 
 jobs:
   pytest:
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -17,7 +14,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
       - name: Install dependencies
         run: |
@@ -30,4 +27,4 @@ jobs:
       - name: Ruff
         run: ruff check investment_ai main.py tests
       - name: Whitespace
-        run: git diff --check
+        run: git diff-tree --check --no-commit-id -r HEAD

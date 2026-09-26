@@ -47,6 +47,7 @@ class HistoryStore:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self._schema()
@@ -71,6 +72,9 @@ class HistoryStore:
         )
         if existing == 1:
             self.migrate_v1_to_v2()
+            existing = 2
+        if existing == 2:
+            self.migrate_v2_to_v3()
         self.db.execute(
             "INSERT OR REPLACE INTO metadata(key,value) VALUES ('database_schema_version',?)",
             (str(DATABASE_SCHEMA_VERSION),),
@@ -103,7 +107,7 @@ class HistoryStore:
     def upsert_analyst(
         self, symbol: str, data: dict[str, Any], when: datetime | None = None
     ) -> bool:
-        """Persist only a genuine provider observation timestamp; duplicates are ignored."""
+        """Deprecated legacy wide-table writer; the product flow does not call it."""
         when = when or datetime.now(timezone.utc)
         fields = ["snapshot_date", "fetched_at_utc", "symbol"] + SNAPSHOT_FIELDS
         values = [when.date().isoformat(), when.isoformat(), symbol] + [
@@ -214,16 +218,24 @@ class HistoryStore:
             "benchmark_price", "index_name", "sector", "quality_score", "growth_score",
             "valuation_score", "expectations_long_score", "long_trend_score",
             "setup_quality_score", "expectations_short_score", "volume_confirmation_score",
+            "price_as_of", "benchmark_symbol", "benchmark_price_as_of",
         ]
         with self.db:
             self.db.executemany(
-                f"INSERT OR IGNORE INTO prediction_snapshots VALUES ({','.join('?' * 23)})",
+                f"INSERT OR IGNORE INTO prediction_snapshots VALUES ({','.join('?' * 26)})",
                 [[run_id, timestamp, row["symbol"], model_version] + [row.get(k) for k in keys] for row in rows],
             )
             self.db.executemany(
                 "INSERT OR IGNORE INTO prediction_outcomes(run_id,symbol) VALUES (?,?)",
                 [(run_id, row["symbol"]) for row in rows],
             )
+
+    def migrate_v2_to_v3(self) -> None:
+        """Add immutable stock/benchmark baseline identity without rewriting snapshots."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")}
+        for name in ("price_as_of_utc", "benchmark_symbol", "benchmark_price_as_of_utc"):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT")
 
     def changes(self, symbol: str, days: int = 7, as_of: datetime | None = None):
         cutoff = (

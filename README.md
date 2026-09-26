@@ -10,7 +10,7 @@ web application, or machine-learned weight optimizer.
 
 ## Installation
 
-Python 3.11 and 3.12 are supported.
+Supported Python: 3.12.
 
 ```bash
 python -m venv .venv
@@ -26,9 +26,10 @@ python main.py
 
 The command fetches the two universes, daily prices, and normalized Yahoo provider
 inputs; calculates rankings; stores prediction history; evaluates run health; and
-writes a durable folder under `investment_ai_runs/<run_id>/`. `EXPORT_RESULTS` remains
-a configuration field for compatibility, but critical audit artifacts are always
-written. Exit codes are: `0` valid/degraded success, `1` unexpected failure, `2`
+writes critical audit artifacts unconditionally under `investment_ai_runs/<run_id>/`.
+`EXPORT_RESULTS` is deprecated and reserved for future optional rich/heavy exports; it
+does not disable core artifacts. Exit codes are: `0` valid/degraded success, `1`
+unexpected failure, `2`
 configuration/universe failure, `3` invalid data quality, and `4` database schema
 failure.
 
@@ -70,7 +71,7 @@ timings, cache ratios, score distributions, and benchmark health.
 ## Cache and history
 
 Cache schema 3 invalidates all older parsed objects through normal schema validation.
-SQLite schema 2 uses WAL, a busy timeout, explicit metadata versioning, normalized
+SQLite schema 3 uses WAL, a busy timeout, explicit metadata versioning, normalized
 `analyst_observations`, idempotent ranking history, immutable `prediction_snapshots`,
 and attach-only `prediction_outcomes`. The wide `analyst_snapshots` table is retained
 as archival data but the product flow does not write it.
@@ -80,12 +81,17 @@ as archival data but the product flow does not write it.
 ```bash
 python main.py --resume <run_id>
 python main.py --replay <run_id>
+python main.py --rescore <run_id>
 ```
 
 Checkpoints record universe/prices, successful and failed provider symbols, analysis,
 history, and exports. Resume reuses completed inputs, skips successful symbols, retries
 failures, and uses idempotent database keys. Replay reads the original CSV inputs and
-does not invoke Yahoo. Replay writes to `<run_id>-replay`; the original capture remains
+does not invoke Yahoo. Exact replay requires matching scoring versions and intact input
+checksums, and preserves source rank-change diagnostics rather than consulting today's
+history database. Rescore intentionally applies the current model and is labelled
+`RESCORE`. Neither mode writes ranking, prediction, or outcome history. Replay writes to
+`<run_id>-replay`; the original capture remains
 unchanged.
 
 ## Benchmark-adjusted relative strength
@@ -106,6 +112,10 @@ prices, benchmark, region, sector, and pillar scores exactly as known at that ru
 Outcome attachment adds realized 5/10/20/63/126/252-session stock, benchmark, and
 excess returns without recomputing historical scores. Generate summaries with:
 
+Successful fresh normal runs automatically attach matured stock, benchmark, and excess
+outcomes using the already-downloaded price history and each snapshot's saved price and
+price-as-of timestamp.
+
 ```bash
 python main.py --validation-report
 ```
@@ -119,8 +129,8 @@ automatic model-weight tuning.
 
 - Yahoo is an unofficial external dependency and its availability/schema can change.
 - Benchmark RS remains experimental pending accumulated side-by-side evidence.
-- Outcome updating requires future daily price histories supplied to the updater; the
-  report cannot manufacture outcomes that have not matured.
+- Resumed runs without retained raw price history defer outcome attachment to the next
+  fresh normal run; the report cannot manufacture outcomes that have not matured.
 - CSV is used for portable, dependency-light intermediate storage rather than Parquet.
 - Scores are research support, not investment advice; taxes, spreads, FX, and portfolio
   suitability are outside scope.

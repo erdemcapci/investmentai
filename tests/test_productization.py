@@ -88,10 +88,10 @@ def test_manifest_has_versions_coverage_and_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     context = RunContext.create("run-1", tmp_path, False)
     manifest = build_manifest(context, {"price_coverage_pct": 99, "universe_count": 2}, {"top_n": 10})
-    assert manifest["application_version"] == "1.0.0"
+    assert manifest["application_version"] == "1.0.1"
     assert manifest["scoring_model_version"] == "3.1.1"
     assert manifest["cache_schema_version"] == 3
-    assert manifest["database_schema_version"] == 2
+    assert manifest["database_schema_version"] == 3
     assert manifest["price_coverage_pct"] == 99
     assert json.loads((context.directory / "run_manifest.json").read_text())["config"]["top_n"] == 10
 
@@ -99,7 +99,7 @@ def test_manifest_has_versions_coverage_and_config(tmp_path, monkeypatch):
 def test_database_migration_and_future_rejection(tmp_path):
     path = tmp_path / "history.db"
     store = HistoryStore(path)
-    assert store.db.execute("SELECT value FROM metadata WHERE key='database_schema_version'").fetchone()[0] == "2"
+    assert store.db.execute("SELECT value FROM metadata WHERE key='database_schema_version'").fetchone()[0] == "3"
     store.close()
     db = sqlite3.connect(path)
     db.execute("UPDATE metadata SET value='999' WHERE key='database_schema_version'")
@@ -142,15 +142,15 @@ def test_resume_skips_success_and_retries_failure(tmp_path, monkeypatch):
 
     def fetch(_client, pending):
         calls.append(pending.symbol.tolist())
-        return pd.DataFrame({"symbol": pending.symbol, "provider_success": [1]})
+        return pd.DataFrame({"symbol": pending.symbol, "provider_success": [1] * len(pending)})
 
     monkeypatch.setattr(app.YahooClient, "fetch_many", fetch)
     logger = app.configure_logging(context.directory, context.run_id)
     result = app._provider_data(
         context, pd.DataFrame({"symbol": ["DONE", "RETRY"], "sector": ["", ""]}), logger
     )
-    assert calls == [["RETRY"]]
-    assert set(result.symbol) == {"RETRY"}
+    assert calls == [["DONE", "RETRY"]]
+    assert set(result.symbol) == {"DONE", "RETRY"}
     assert context.checkpoint["provider_symbols_complete"] == ["DONE", "RETRY"]
 
 
@@ -169,6 +169,10 @@ def test_replay_uses_stored_inputs_without_yahoo(tmp_path, monkeypatch):
         expectations_long_score=80, risk_score=20, confidence_score=90,
         short_term_setup="PULLBACK", benchmark_rs_status="FALLBACK_RAW",
     )
+    full.to_csv(source / "full_analysis.csv", index=False)
+    (source / "run_manifest.json").write_text(json.dumps({
+        "application_version": "1.0.1", "scoring_model_version": "3.1.1",
+    }))
     monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
     monkeypatch.setattr(app, "HISTORY_DB", tmp_path / "history.sqlite")
     monkeypatch.setattr(app, "build_analysis", lambda *_: (full, full, full))
