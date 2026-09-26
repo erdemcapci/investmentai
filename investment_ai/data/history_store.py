@@ -35,10 +35,25 @@ SNAPSHOT_FIELDS = [
 
 COMPONENT_FIELDS = {
     "targets": {"target_low", "target_mean", "target_median", "target_high"},
-    "recommendations": {"strong_buy", "buy", "hold", "sell", "strong_sell", "positive_rating_pct", "rating_count"},
-    "eps_trend": {field for field in SNAPSHOT_FIELDS if field.startswith("eps_") and field.endswith("_current")},
+    "recommendations": {
+        "strong_buy",
+        "buy",
+        "hold",
+        "sell",
+        "strong_sell",
+        "positive_rating_pct",
+        "rating_count",
+    },
+    "eps_trend": {
+        field
+        for field in SNAPSHOT_FIELDS
+        if field.startswith("eps_") and field.endswith("_current")
+    },
     "earnings_estimate": {"forward_eps_growth"},
-    "revenue_estimate": {field for field in SNAPSHOT_FIELDS if field.startswith("revenue_")} | {"forward_revenue_growth"},
+    "revenue_estimate": {
+        field for field in SNAPSHOT_FIELDS if field.startswith("revenue_")
+    }
+    | {"forward_revenue_growth"},
 }
 
 
@@ -53,8 +68,12 @@ class HistoryStore:
         self._schema()
 
     def _schema(self) -> None:
-        self.db.execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        row = self.db.execute("SELECT value FROM metadata WHERE key='database_schema_version'").fetchone()
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)"
+        )
+        row = self.db.execute(
+            "SELECT value FROM metadata WHERE key='database_schema_version'"
+        ).fetchone()
         existing = int(row[0]) if row else 1
         if existing > DATABASE_SCHEMA_VERSION:
             raise RuntimeError(
@@ -78,6 +97,9 @@ class HistoryStore:
             existing = 3
         if existing == 3:
             self.migrate_v3_to_v4()
+            existing = 4
+        if existing == 4:
+            self.migrate_v4_to_v5()
         self.db.execute(
             "INSERT OR REPLACE INTO metadata(key,value) VALUES ('database_schema_version',?)",
             (str(DATABASE_SCHEMA_VERSION),),
@@ -121,14 +143,25 @@ class HistoryStore:
         self.db.commit()
         return bool(cursor.rowcount)
 
-    def upsert_component(self, symbol: str, component: str, data: dict[str, Any], when: datetime) -> bool:
+    def upsert_component(
+        self, symbol: str, component: str, data: dict[str, Any], when: datetime
+    ) -> bool:
         """Write only fields owned by one freshly fetched analyst component."""
         fields = COMPONENT_FIELDS.get(component, set())
         rows = []
         for field in fields:
             value = pd.to_numeric(data.get(field), errors="coerce")
             if pd.notna(value):
-                rows.append((symbol, component, when.isoformat(), when.date().isoformat(), field, float(value)))
+                rows.append(
+                    (
+                        symbol,
+                        component,
+                        when.isoformat(),
+                        when.date().isoformat(),
+                        field,
+                        float(value),
+                    )
+                )
         before = self.db.total_changes
         self.db.executemany(
             "INSERT OR IGNORE INTO analyst_observations(symbol,component,observed_at_utc,snapshot_date,field,value) VALUES (?,?,?,?,?,?)",
@@ -148,9 +181,9 @@ class HistoryStore:
         if field not in SNAPSHOT_FIELDS:
             return np.nan, "HISTORY_NOT_YET_AVAILABLE"
         as_of = as_of or datetime.now(timezone.utc)
-        cutoff = (as_of.date() - timedelta(days=days)).isoformat()
+        cutoff = (as_of - timedelta(days=days)).isoformat()
         row = self.db.execute(
-            "SELECT value FROM analyst_observations WHERE symbol=? AND field=? AND snapshot_date<=? ORDER BY observed_at_utc DESC LIMIT 1",
+            "SELECT value FROM analyst_observations WHERE symbol=? AND field=? AND observed_at_utc<=? ORDER BY observed_at_utc DESC LIMIT 1",
             (symbol, field, cutoff),
         ).fetchone()
         current = pd.to_numeric(current, errors="coerce")
@@ -186,9 +219,15 @@ class HistoryStore:
                 )
         for horizon in ("0y", "plus_1y"):
             for days in (30, 90):
-                output[f"revenue_{horizon}_change_{days}d_pct"], _ = self.historical_change(
-                    symbol, f"revenue_{horizon}_avg", days,
-                    row.get(f"revenue_{horizon}_avg"), as_of)
+                output[f"revenue_{horizon}_change_{days}d_pct"], _ = (
+                    self.historical_change(
+                        symbol,
+                        f"revenue_{horizon}_avg",
+                        days,
+                        row.get(f"revenue_{horizon}_avg"),
+                        as_of,
+                    )
+                )
         return output
 
     def save_rankings(
@@ -215,18 +254,40 @@ class HistoryStore:
         )
         self.db.commit()
 
-    def save_predictions(self, run_id: str, timestamp: str, model_version: str,
-                         rows: list[dict[str, Any]], lt_run_status: str = "VALID",
-                         st_run_status: str = "VALID",
-                         overall_run_status: str = "VALID") -> None:
+    def save_predictions(
+        self,
+        run_id: str,
+        timestamp: str,
+        model_version: str,
+        rows: list[dict[str, Any]],
+        lt_run_status: str = "VALID",
+        st_run_status: str = "VALID",
+        overall_run_status: str = "VALID",
+    ) -> None:
         """Idempotently save scores as observed; outcome updates never recompute them."""
         keys = [
-            "long_term_score", "long_term_rank", "short_term_score", "short_term_rank",
-            "risk_score", "confidence_score", "short_term_setup", "current_price",
-            "benchmark_price", "index_name", "sector", "quality_score", "growth_score",
-            "valuation_score", "expectations_long_score", "long_trend_score",
-            "setup_quality_score", "expectations_short_score", "volume_confirmation_score",
-            "price_as_of", "benchmark_symbol", "benchmark_price_as_of",
+            "long_term_score",
+            "long_term_rank",
+            "short_term_score",
+            "short_term_rank",
+            "risk_score",
+            "confidence_score",
+            "short_term_setup",
+            "current_price",
+            "benchmark_price",
+            "index_name",
+            "sector",
+            "quality_score",
+            "growth_score",
+            "valuation_score",
+            "expectations_long_score",
+            "long_trend_score",
+            "setup_quality_score",
+            "expectations_short_score",
+            "volume_confirmation_score",
+            "price_as_of",
+            "benchmark_symbol",
+            "benchmark_price_as_of",
         ]
         with self.db:
             self.db.executemany(
@@ -238,9 +299,12 @@ class HistoryStore:
                 short_expectations_score,volume_score,price_as_of_utc,benchmark_symbol,
                 benchmark_price_as_of_utc,lt_run_status,st_run_status,overall_run_status
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [[run_id, timestamp, row["symbol"], model_version] +
-                 [row.get(k) for k in keys] +
-                 [lt_run_status, st_run_status, overall_run_status] for row in rows],
+                [
+                    [run_id, timestamp, row["symbol"], model_version]
+                    + [row.get(k) for k in keys]
+                    + [lt_run_status, st_run_status, overall_run_status]
+                    for row in rows
+                ],
             )
             self.db.executemany(
                 "INSERT OR IGNORE INTO prediction_outcomes(run_id,symbol) VALUES (?,?)",
@@ -249,17 +313,78 @@ class HistoryStore:
 
     def migrate_v2_to_v3(self) -> None:
         """Add immutable stock/benchmark baseline identity without rewriting snapshots."""
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")}
-        for name in ("price_as_of_utc", "benchmark_symbol", "benchmark_price_as_of_utc"):
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")
+        }
+        for name in (
+            "price_as_of_utc",
+            "benchmark_symbol",
+            "benchmark_price_as_of_utc",
+        ):
             if name not in columns:
-                self.db.execute(f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT")
+                self.db.execute(
+                    f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT"
+                )
 
     def migrate_v3_to_v4(self) -> None:
         """Record horizon health so validation can exclude unusable predictions."""
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")}
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")
+        }
         for name in ("lt_run_status", "st_run_status", "overall_run_status"):
             if name not in columns:
-                self.db.execute(f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT")
+                self.db.execute(
+                    f"ALTER TABLE prediction_snapshots ADD COLUMN {name} TEXT"
+                )
+
+    def migrate_v4_to_v5(self) -> None:
+        """Add stable identity, frozen benchmark metadata, outcome state, and query indexes."""
+        snapshot_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(prediction_snapshots)")
+        }
+        additions = {
+            "security_id": "TEXT",
+            "benchmark_name": "TEXT",
+            "benchmark_return_basis": "TEXT",
+            "benchmark_currency": "TEXT",
+            "benchmark_assignment_method": "TEXT",
+            "trading_currency": "TEXT",
+            "financial_statement_currency": "TEXT",
+            "market_cap_currency": "TEXT",
+        }
+        for name, kind in additions.items():
+            if name not in snapshot_columns:
+                self.db.execute(
+                    f"ALTER TABLE prediction_snapshots ADD COLUMN {name} {kind}"
+                )
+        self.db.execute("""CREATE TABLE IF NOT EXISTS outcome_status(
+            run_id TEXT NOT NULL,symbol TEXT NOT NULL,horizon TEXT NOT NULL,
+            status TEXT NOT NULL,reason TEXT,updated_at_utc TEXT NOT NULL,
+            PRIMARY KEY(run_id,symbol,horizon))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS security_mappings(
+            security_id TEXT NOT NULL,listing_id TEXT NOT NULL,source_index TEXT NOT NULL,
+            source_symbol TEXT NOT NULL,company_name TEXT,country TEXT,exchange TEXT,isin TEXT,
+            canonical_symbol TEXT,mapping_status TEXT NOT NULL,mapping_method TEXT NOT NULL,
+            mapping_confidence REAL NOT NULL,verified_at_utc TEXT,last_seen_at_utc TEXT NOT NULL,
+            mapping_error TEXT,PRIMARY KEY(source_index,source_symbol,country))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS daily_prices(
+            security_id TEXT NOT NULL,symbol TEXT NOT NULL,date TEXT NOT NULL,
+            adjusted_close REAL,raw_close REAL,volume REAL,currency TEXT,exchange TEXT,
+            source TEXT NOT NULL,fetched_at_utc TEXT NOT NULL,quality_status TEXT NOT NULL,
+            quality_flags TEXT,price_repair_attempted INTEGER NOT NULL DEFAULT 0,
+            price_repair_succeeded INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(security_id,date))""")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analyst_symbol_field_time ON analyst_observations(symbol,field,observed_at_utc)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ranking_symbol_time ON ranking_history(symbol,run_timestamp)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_time_symbol ON prediction_snapshots(run_timestamp,symbol)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outcomes_run_symbol ON prediction_outcomes(run_id,symbol)"
+        )
 
     def changes(self, symbol: str, days: int = 7, as_of: datetime | None = None):
         cutoff = (
@@ -270,6 +395,54 @@ class HistoryStore:
             (symbol, cutoff),
         ).fetchone()
         return dict(row) if row else None
+
+    def changes_by_field(
+        self, symbol: str, days: int = 7, as_of: datetime | None = None
+    ) -> dict[str, Any]:
+        """Select the latest non-null historical value independently per field."""
+        cutoff = (
+            (as_of or datetime.now(timezone.utc)) - timedelta(days=days)
+        ).isoformat()
+        output = {}
+        for field in (
+            "long_term_score",
+            "long_term_rank",
+            "short_term_score",
+            "short_term_rank",
+        ):
+            row = self.db.execute(
+                f"SELECT {field} FROM ranking_history WHERE symbol=? AND run_timestamp<=? "
+                f"AND {field} IS NOT NULL ORDER BY run_timestamp DESC LIMIT 1",
+                (symbol, cutoff),
+            ).fetchone()
+            output[field] = row[0] if row else None
+            output[f"{field}_history_status"] = (
+                "AVAILABLE" if row else "NO_VALID_HISTORICAL_VALUE"
+            )
+        return output
+
+    def pending_outcome_symbols(self, as_of: datetime | None = None) -> set[str]:
+        """Return historical symbols with at least one matured, unpriced horizon."""
+        as_of = as_of or datetime.now(timezone.utc)
+        rows = self.db.execute("""SELECT p.symbol,p.run_timestamp,o.* FROM prediction_snapshots p
+            JOIN prediction_outcomes o USING(run_id,symbol)""").fetchall()
+        fields = [
+            d[0]
+            for d in self.db.execute("""SELECT p.symbol,p.run_timestamp,o.* FROM
+            prediction_snapshots p JOIN prediction_outcomes o USING(run_id,symbol) LIMIT 0""").description
+        ]
+        horizons = {"5d": 5, "10d": 10, "20d": 20, "3m": 63, "6m": 126, "12m": 252}
+        pending = set()
+        for raw in rows:
+            row = dict(zip(fields, raw))
+            started = datetime.fromisoformat(row["run_timestamp"])
+            if any(
+                as_of >= started + timedelta(days=int(sessions * 7 / 5) + 4)
+                and row.get(f"forward_{label}_return") is None
+                for label, sessions in horizons.items()
+            ):
+                pending.add(row["symbol"])
+        return pending
 
     def close(self) -> None:
         self.db.close()
