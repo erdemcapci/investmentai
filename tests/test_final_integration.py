@@ -7,6 +7,7 @@ import pytest
 
 import main
 from investment_ai.data.constituents import fetch_stoxx600_constituents
+from investment_ai.config import MAPPING_INVALID_PCT, SCORING_MODEL_VERSION
 from investment_ai.data.price_store import PriceStore
 from investment_ai.data.symbol_resolver import SymbolResolver
 from investment_ai.data.yahoo import currency_metadata
@@ -31,6 +32,144 @@ from investment_ai.data.history_store import HistoryStore
 def test_raw_stoxx_resolution_end_to_end(raw, country, canonical):
     resolver = SymbolResolver(sqlite3.connect(":memory:"))
     assert resolver.resolve("STOXX Europe 600", raw, raw, country).canonical_yahoo_symbol == canonical
+
+
+@pytest.mark.parametrize("raw", ["RR-", "BP-", "BA-", "NG-", "AV-", "UU-", "SN-", "TW-", "QQ-"])
+def test_uk_trailing_separator_is_removed_before_yahoo_suffix(raw):
+    resolver = SymbolResolver(sqlite3.connect(":memory:"))
+    result = resolver.resolve(
+        "STOXX Europe 600", raw, "London equity", "United Kingdom",
+        exchange="London Stock Exchange",
+    )
+    assert result.canonical_yahoo_symbol == f"{raw[:-1]}.L"
+    assert "-.L" not in result.canonical_yahoo_symbol
+
+
+@pytest.mark.parametrize(
+    "raw,company,canonical",
+    [
+        ("VOLVB", "VOLVO CLASS B", "VOLV-B.ST"),
+        ("ASSAB", "ASSA ABLOY B", "ASSA-B.ST"),
+        ("NIBEB", "NIBE INDUSTRIER CLASS B", "NIBE-B.ST"),
+        ("SWEDA", "SWEDBANK CLASS A", "SWED-A.ST"),
+        ("SEBA", "SEB CLASS A", "SEB-A.ST"),
+        ("SHBA", "SHB-A SHS", "SHB-A.ST"),
+        ("HEXAB", "HEXAGON CLASS B", "HEXA-B.ST"),
+        ("SAABB", "SAAB CLASS B", "SAAB-B.ST"),
+        ("ESSITYB", "ESSITY CLASS B", "ESSITY-B.ST"),
+        ("SKAB", "SKANSKA B", "SKA-B.ST"),
+        ("TEL2B", "TELE2 B", "TEL2-B.ST"),
+    ],
+)
+def test_compressed_swedish_class_requires_company_class_evidence(
+    raw, company, canonical
+):
+    resolver = SymbolResolver(sqlite3.connect(":memory:"))
+    result = resolver.resolve(
+        "STOXX Europe 600", raw, company, "Sweden",
+        exchange="Nasdaq Omx Nordic",
+    )
+    assert result.canonical_yahoo_symbol == canonical
+    assert result.mapping_method == "NORDIC_SHARE_CLASS"
+
+
+@pytest.mark.parametrize(
+    "raw,company,country,exchange,canonical",
+    [
+        ("VOLV B", "VOLVO CLASS B", "Sweden", "Nasdaq Omx Nordic", "VOLV-B.ST"),
+        ("NOVO B", "NOVO NORDISK CLASS B", "Denmark", "Omx Nordic Exchange Copenhagen A/S", "NOVO-B.CO"),
+        ("NDA FI", "NORDEA BANK", "Finland", "Nasdaq Omx Helsinki Ltd.", "NDA-FI.HE"),
+        ("BT.A", "BT GROUP PLC", "United Kingdom", "London Stock Exchange", "BT-A.L"),
+    ],
+)
+def test_delimited_ishares_exchange_formats(
+    raw, company, country, exchange, canonical
+):
+    resolver = SymbolResolver(sqlite3.connect(":memory:"))
+    result = resolver.resolve(
+        "STOXX Europe 600", raw, company, country, exchange=exchange
+    )
+    assert result.canonical_yahoo_symbol == canonical
+
+
+@pytest.mark.parametrize(
+    "raw,country,canonical",
+    [("SAP.DE", "Germany", "SAP.DE"), ("MC.PA", "France", "MC.PA"),
+     ("ASML.AS", "Netherlands", "ASML.AS")],
+)
+def test_vendor_qualified_symbols_are_preserved(raw, country, canonical):
+    resolver = SymbolResolver(sqlite3.connect(":memory:"))
+    result = resolver.resolve("STOXX Europe 600", raw, raw, country)
+    assert result.canonical_yahoo_symbol == canonical
+    assert result.mapping_method == "VENDOR_QUALIFIED"
+
+
+def test_exchange_rules_do_not_over_normalize_ambiguous_symbols():
+    resolver = SymbolResolver(sqlite3.connect(":memory:"))
+    german = resolver.resolve("STOXX Europe 600", "ABCB", "Example", "Germany")
+    ambiguous = resolver.resolve(
+        "STOXX Europe 600", "ABCDEB", "Example", "Sweden",
+        exchange="Nasdaq Omx Nordic",
+    )
+    no_context = resolver.resolve("STOXX Europe 600", "VOLV B", "VOLVO CLASS B", "")
+    punctuated = resolver.resolve(
+        "STOXX Europe 600", "ABC-DEF", "Example", "United Kingdom"
+    )
+    assert german.canonical_yahoo_symbol == "ABCB.DE"
+    assert ambiguous.canonical_yahoo_symbol == "ABCDEB.ST"
+    assert ambiguous.canonical_yahoo_symbol != "ABCDE-B.ST"
+    assert no_context.canonical_yahoo_symbol is None
+    assert punctuated.canonical_yahoo_symbol == "ABC-DEF.L"
+
+
+def test_wrong_yahoo_asset_type_cannot_verify_stoxx_equity():
+    resolver = SymbolResolver(
+        sqlite3.connect(":memory:"),
+        lambda _: {
+            "symbol": "AIR.PA", "longName": "Airbus SE", "country": "France",
+            "exchange": "PAR", "quoteType": "ETF",
+        },
+    )
+    result = resolver.resolve(
+        "STOXX Europe 600", "AIR", "Airbus SE", "France",
+        exchange="Nyse Euronext - Euronext Paris",
+    )
+    assert result.mapping_status == "AMBIGUOUS"
+    assert result.mapping_error == "provider identity mismatch"
+
+
+def test_ishares_and_yahoo_exchange_names_verify_as_same_venue():
+    resolver = SymbolResolver(
+        sqlite3.connect(":memory:"),
+        lambda _: {
+            "symbol": "SAP.DE", "longName": "SAP SE", "country": "Germany",
+            "exchange": "GER", "fullExchangeName": "XETRA", "quoteType": "EQUITY",
+        },
+    )
+    result = resolver.resolve(
+        "STOXX Europe 600", "SAP", "SAP SE", "Germany", exchange="Xetra"
+    )
+    assert result.mapping_status == "VERIFIED"
+
+
+def test_missing_endpoint_data_does_not_invalidate_valid_equity_mapping():
+    mapping = SymbolResolver(sqlite3.connect(":memory:")).resolve(
+        "STOXX Europe 600", "SAP", "SAP SE", "Germany", exchange="Xetra"
+    )
+    resolver = SymbolResolver(sqlite3.connect(":memory:"))
+    verified = resolver.verify(
+        mapping.as_dict(),
+        {
+            "symbol": "SAP.DE", "longName": "SAP SE", "country": "Germany",
+            "exchange": "GER", "quoteType": "EQUITY",
+        },
+    )
+    assert verified.mapping_status == "VERIFIED"
+
+
+def test_stoxx_mapping_health_gate_and_scoring_version_are_unchanged():
+    assert MAPPING_INVALID_PCT == 90
+    assert SCORING_MODEL_VERSION == "3.1.2"
 
 
 def test_provider_identity_mismatch_and_verified_persistence():

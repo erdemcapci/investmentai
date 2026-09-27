@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4
+
+- Added exchange-aware normalization for iShares STOXX local ticker formats.
+- Fixed London trailing-separator ticker handling.
+- Added deterministic Nordic share-class normalization.
+- Preserved Yahoo identity verification and invalid-symbol fail-fast behavior.
+- No scoring, ranking, validation, risk, or confidence changes.
+
 ## 1.1.3
 
 - Renamed the generated benchmark assignment metadata field from

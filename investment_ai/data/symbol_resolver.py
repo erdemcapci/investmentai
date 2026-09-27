@@ -19,6 +19,26 @@ KNOWN_EXCEPTIONS = {
     ("switzerland", "SRENH"): "SREN.SW",
 }
 COMPANY_NOISE = {"plc", "ag", "sa", "se", "nv", "ab", "group", "holding", "holdings", "the"}
+NORDIC_CLASS_COUNTRIES = {"sweden", "denmark", "finland", "norway"}
+YAHOO_EXCHANGE_BY_COUNTRY = {
+    "austria": {"VIE", "VIENNA"},
+    "belgium": {"BRU", "BRUSSELS"},
+    "denmark": {"CPH", "COPENHAGEN"},
+    "finland": {"HEL", "HELSINKI"},
+    "france": {"PAR", "PARIS"},
+    "germany": {"GER", "XETRA"},
+    "ireland": {"ISE", "IRISH"},
+    "italy": {"MIL", "MILAN"},
+    "netherlands": {"AMS", "AMSTERDAM"},
+    "norway": {"OSL", "OSLO"},
+    "poland": {"WSE", "WARSAW"},
+    "portugal": {"LIS", "LISBON"},
+    "spain": {"MCE", "MADRID"},
+    "sweden": {"STO", "STOCKHOLM"},
+    "switzerland": {"EBS", "SWISS"},
+    "united kingdom": {"LSE", "LONDON"},
+    "uk": {"LSE", "LONDON"},
+}
 
 
 @dataclass(frozen=True)
@@ -56,18 +76,109 @@ def _identity(
     return "SEC:" + hashlib.sha256(stable.encode()).hexdigest()[:24]
 
 
-def _candidate(symbol: str, country: str) -> tuple[str | None, str]:
-    raw = re.sub(r"\s+", "", str(symbol)).upper()
-    key = (country.strip().lower(), raw.replace(".", ""))
+def _company_declares_share_class(company_name: str, share_class: str) -> bool:
+    name = str(company_name).strip().upper()
+    patterns = (
+        rf"\bCLASS\s+{share_class}\b",
+        rf"[- ]{share_class}\s+(?:SHS|SHARES)\b",
+        rf"\b{share_class}$",
+    )
+    return any(re.search(pattern, name) for pattern in patterns)
+
+
+def normalize_local_ticker(
+    source_symbol: str,
+    country: str | None,
+    exchange: str | None = None,
+    company_name: str = "",
+) -> tuple[str, str]:
+    """Normalize only deterministic exchange-specific source conventions."""
+    raw = str(source_symbol).strip().upper()
+    country_key = str(country or "").strip().casefold()
+    exchange_key = str(exchange or "").strip().casefold()
+
+    uk_context = country_key in {"united kingdom", "uk"} or "london" in exchange_key
+    if uk_context and re.fullmatch(r"[A-Z0-9][A-Z0-9./-]*[.-]", raw):
+        return raw[:-1], "UK_TRAILING_SEPARATOR"
+    if uk_context:
+        uk_class = re.fullmatch(r"([A-Z0-9]+)\.([A-Z])", raw)
+        if uk_class:
+            return f"{uk_class.group(1)}-{uk_class.group(2)}", "UK_SHARE_CLASS"
+
+    nordic_context = country_key in NORDIC_CLASS_COUNTRIES or any(
+        marker in exchange_key
+        for marker in ("stockholm", "copenhagen", "helsinki", "oslo")
+    )
+    if nordic_context:
+        finnish_listing = re.fullmatch(r"([A-Z0-9]+)[ .-](FI)", raw)
+        if country_key == "finland" and finnish_listing:
+            return (
+                f"{finnish_listing.group(1)}-{finnish_listing.group(2)}",
+                "FINNISH_LISTING_MARKER",
+            )
+        explicit = re.fullmatch(r"([A-Z0-9]+)[ .-](A|B|C|SDB)", raw)
+        if explicit:
+            return f"{explicit.group(1)}-{explicit.group(2)}", "NORDIC_SHARE_CLASS"
+        compressed = re.fullmatch(r"([A-Z0-9]+)([AB])", raw)
+        if compressed and _company_declares_share_class(
+            company_name, compressed.group(2)
+        ):
+            return (
+                f"{compressed.group(1)}-{compressed.group(2)}",
+                "NORDIC_SHARE_CLASS",
+            )
+
+    return raw, "LOCAL_TICKER_UNCHANGED"
+
+
+def _exchange_matches(
+    source_exchange: str | None,
+    provider_exchange: str | None,
+    provider_full_exchange: str | None,
+    country: str,
+) -> bool:
+    if not source_exchange or (not provider_exchange and not provider_full_exchange):
+        return True
+    source = str(source_exchange).strip().casefold()
+    provider_values = {
+        str(value).strip().upper()
+        for value in (provider_exchange, provider_full_exchange)
+        if value
+    }
+    if source in {value.casefold() for value in provider_values}:
+        return True
+    expected = YAHOO_EXCHANGE_BY_COUNTRY.get(str(country).strip().casefold(), set())
+    return bool(provider_values & expected)
+
+
+def _candidate(
+    symbol: str,
+    country: str,
+    exchange: str | None = None,
+    company_name: str = "",
+) -> tuple[str | None, str]:
+    raw = str(symbol).strip().upper()
+    country_key = str(country or "").strip().lower()
+    suffix = YAHOO_SUFFIX_BY_COUNTRY.get(country_key)
+    if raw and any(raw.endswith(value) for value in set(YAHOO_SUFFIX_BY_COUNTRY.values())):
+        return raw, "VENDOR_QUALIFIED"
+    compact = re.sub(r"\s+", "", raw)
+    key = (country_key, compact.replace(".", ""))
     if key in KNOWN_EXCEPTIONS:
         return KNOWN_EXCEPTIONS[key], "KNOWN_VENDOR_EXCEPTION"
-    suffix = YAHOO_SUFFIX_BY_COUNTRY.get(country.strip().lower())
-    if not raw or raw == "NAN" or not suffix:
+    local, normalization_method = normalize_local_ticker(
+        raw, country, exchange, company_name
+    )
+    if not local or local == "NAN" or not suffix:
         return None, "UNSUPPORTED_OR_MISSING"
-    if raw.endswith(suffix):
-        return raw, "VENDOR_QUALIFIED"
-    # Only transformations with unambiguous local syntax are deterministic.
-    return raw.replace(".", "-") + suffix, "EXCHANGE_SUFFIX_HEURISTIC"
+    if re.search(r"\s", local):
+        return None, "AMBIGUOUS_LOCAL_FORMAT"
+    method = (
+        normalization_method
+        if normalization_method != "LOCAL_TICKER_UNCHANGED"
+        else "EXCHANGE_SUFFIX_HEURISTIC"
+    )
+    return local + suffix, method
 
 
 class SymbolResolver:
@@ -104,6 +215,9 @@ class SymbolResolver:
         isin: str | None = None,
     ) -> SymbolMapping:
         now = datetime.now(timezone.utc).isoformat()
+        candidate, method = _candidate(
+            source_symbol, country, exchange, company_name
+        )
         persisted = self.db.execute(
             "SELECT * FROM security_mappings WHERE source_index=? AND source_symbol=? AND country=?",
             (source_index, source_symbol, country),
@@ -112,6 +226,7 @@ class SymbolResolver:
             persisted
             and persisted[9] == "UNRESOLVED"
             and persisted[10] == "YAHOO_INVALID_SYMBOL"
+            and persisted[8] == candidate
         )
         if persisted and (persisted[9] == "VERIFIED" or persisted_invalid):
             values = dict(
@@ -146,7 +261,6 @@ class SymbolResolver:
                 values["verified_at_utc"],
                 values["mapping_error"],
             )
-        candidate, method = _candidate(source_symbol, country)
         status, confidence, verified, error = "UNRESOLVED", 0.0, None, None
         if candidate:
             status, confidence = (
@@ -168,13 +282,14 @@ class SymbolResolver:
                         not metadata.get("country")
                         or str(metadata["country"]).casefold() == country.casefold()
                     )
-                    exchange_ok = (
-                        not exchange
-                        or not metadata.get("exchange")
-                        or str(metadata["exchange"]).casefold() == exchange.casefold()
+                    exchange_ok = _exchange_matches(
+                        exchange,
+                        metadata.get("exchange"),
+                        metadata.get("fullExchangeName"),
+                        country,
                     )
                     quote_type = str(metadata.get("quoteType", "")).upper()
-                    listing_ok = not quote_type or quote_type in {"EQUITY", "ETF"}
+                    listing_ok = not quote_type or quote_type == "EQUITY"
                     # A meaningful shared identity token is required; merely
                     # receiving a Yahoo object never verifies a mapping.
                     name_ok = bool(expected and actual and expected & actual)
@@ -292,11 +407,16 @@ class SymbolResolver:
         provider_name = metadata.get("longName") or metadata.get("shortName") or metadata.get("name", "")
         actual = set(re.findall(r"[a-z0-9]+", str(provider_name).casefold())) - COMPANY_NOISE
         country_ok = not metadata.get("country") or str(metadata["country"]).casefold() == current.country.casefold()
-        exchange_ok = not current.exchange or not metadata.get("exchange") or str(metadata["exchange"]).casefold() == current.exchange.casefold()
+        exchange_ok = _exchange_matches(
+            current.exchange,
+            metadata.get("exchange"),
+            metadata.get("fullExchangeName"),
+            current.country,
+        )
         quote_type = str(metadata.get("quoteType", "")).upper()
         provider_symbol = str(metadata.get("symbol", "")).upper()
         symbol_ok = not provider_symbol or provider_symbol == current.canonical_yahoo_symbol.upper()
-        identity_ok = bool(expected and actual and expected & actual) and country_ok and exchange_ok and symbol_ok and (not quote_type or quote_type in {"EQUITY", "ETF"})
+        identity_ok = bool(expected and actual and expected & actual) and country_ok and exchange_ok and symbol_ok and (not quote_type or quote_type == "EQUITY")
         status = "VERIFIED" if identity_ok else "AMBIGUOUS"
         result = SymbolMapping(
             current.security_id, current.listing_id, current.source_index,

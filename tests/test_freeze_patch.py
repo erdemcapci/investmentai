@@ -85,6 +85,29 @@ def test_persisted_invalid_yahoo_mapping_needs_no_lookup(tmp_path):
     assert repeated.mapping_error == "HTTP Error 404"
 
 
+def test_changed_normalization_supersedes_old_invalid_candidate(tmp_path):
+    db = sqlite3.connect(tmp_path / "m.db")
+    resolver = SymbolResolver(db)
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        """INSERT INTO security_mappings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "SEC:old", "listing-old", "STOXX Europe 600", "VOLV B",
+            "VOLVO CLASS B", "Sweden", "Nasdaq Omx Nordic", None,
+            "VOLVB.ST", "UNRESOLVED", "YAHOO_INVALID_SYMBOL", 0.0,
+            None, now, "HTTP Error 404",
+        ),
+    )
+    db.commit()
+    refreshed = resolver.resolve(
+        "STOXX Europe 600", "VOLV B", "VOLVO CLASS B", "Sweden",
+        exchange="Nasdaq Omx Nordic",
+    )
+    assert refreshed.canonical_yahoo_symbol == "VOLV-B.ST"
+    assert refreshed.mapping_status == "HEURISTIC"
+    assert refreshed.mapping_method == "NORDIC_SHARE_CLASS"
+
+
 def test_price_freshness_metrics_drive_common_and_st_health():
     metrics = {"price_present_coverage_pct": 100, "price_coverage_pct": 100,
                "price_fresh_coverage_pct": 50}

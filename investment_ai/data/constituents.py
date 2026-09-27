@@ -16,7 +16,11 @@ import numpy as np
 import pandas as pd
 import requests
 
-from investment_ai.config import SP500_MIN_CONSTITUENTS, STOXX600_MIN_CONSTITUENTS
+from investment_ai.config import (
+    APPLICATION_VERSION,
+    SP500_MIN_CONSTITUENTS,
+    STOXX600_MIN_CONSTITUENTS,
+)
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 STOXX600_ISHARES_URL = (
@@ -30,14 +34,14 @@ STOXX600_WIKIMEDIA_URL = (
 SUPPORTED_INDEXES = ("sp500", "stoxx600")
 WIKIMEDIA_HEADERS = {
     "User-Agent": (
-        "InvestmentAI/1.1.3 "
+        f"InvestmentAI/{APPLICATION_VERSION} "
         "(https://github.com/erdemcapci/investmentai)"
     ),
     "Accept": "text/html",
 }
 DOWNLOAD_HEADERS = {
     "User-Agent": (
-        "InvestmentAI/1.1.3 "
+        f"InvestmentAI/{APPLICATION_VERSION} "
         "(https://github.com/erdemcapci/investmentai)"
     )
 }
