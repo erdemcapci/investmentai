@@ -1,4 +1,4 @@
-# Investment AI 1.1.4
+# Investment AI 1.1.5
 
 Investment AI is a deterministic, auditable research system that ranks the combined
 S&P 500 and STOXX Europe 600 universe. It produces separate long-term investment and

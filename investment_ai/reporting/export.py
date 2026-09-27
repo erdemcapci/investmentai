@@ -1,7 +1,11 @@
 from __future__ import annotations
 from pathlib import Path
 import pandas as pd
-from investment_ai.reporting.tables import LT_COLUMNS, ST_COLUMNS
+from investment_ai.reporting.tables import (
+    INVESTMENT_RANKING_COLUMNS,
+    LT_COLUMNS,
+    ST_COLUMNS,
+)
 from investment_ai.runtime import atomic_csv, atomic_json
 
 
@@ -24,6 +28,60 @@ def write_validation_snapshot(path: Path, report: dict) -> None:
         "automatic_weight_tuning": False,
         "horizons": horizons,
     })
+
+
+def build_investment_ranking(
+    full: pd.DataFrame, run_status: str
+) -> pd.DataFrame:
+    """Project existing LT/ST results into one human-facing security table."""
+    eligible = full[
+        full.get("long_term_rank", pd.Series(index=full.index, dtype=float)).notna()
+        | full.get("short_term_rank", pd.Series(index=full.index, dtype=float)).notna()
+    ].copy()
+    columns = [column for column in INVESTMENT_RANKING_COLUMNS if column in eligible]
+    if eligible.empty:
+        return pd.DataFrame(columns=["run_status", *columns])
+
+    if "security_id" in eligible:
+        security_ids = eligible["security_id"].astype("string").str.strip()
+        eligible["_export_identity"] = security_ids.where(
+            security_ids.notna() & security_ids.ne(""),
+            eligible["symbol"].astype("string"),
+        )
+        identity = "_export_identity"
+    else:
+        identity = "symbol"
+    records = []
+    for _, group in eligible.groupby(identity, sort=False, dropna=False):
+        record = {}
+        for column in columns:
+            values = group[column].dropna()
+            if column == "index_name":
+                memberships = list(dict.fromkeys(map(str, values)))
+                record[column] = " | ".join(memberships) if memberships else pd.NA
+            else:
+                record[column] = values.iloc[0] if len(values) else pd.NA
+        records.append(record)
+    output = pd.DataFrame(records, columns=columns)
+
+    lt_rank = pd.to_numeric(
+        output.get("long_term_rank", pd.Series(index=output.index, dtype=float)),
+        errors="coerce",
+    )
+    st_rank = pd.to_numeric(
+        output.get("short_term_rank", pd.Series(index=output.index, dtype=float)),
+        errors="coerce",
+    )
+    output["_both_horizons"] = lt_rank.notna() & st_rank.notna()
+    output["_best_rank"] = pd.concat([lt_rank, st_rank], axis=1).min(axis=1)
+    output = output.sort_values(
+        ["_both_horizons", "_best_rank", "symbol"],
+        ascending=[False, True, True],
+        kind="stable",
+        na_position="last",
+    ).drop(columns=["_both_horizons", "_best_rank"])
+    output.insert(0, "run_status", run_status)
+    return output.reset_index(drop=True)
 
 
 def export_run(
@@ -50,6 +108,20 @@ def export_run(
         stale = directory / (normal if status == "INVALID" else diagnostic)
         if stale.exists():
             stale.unlink()
+    run_status = str(
+        metadata.get("overall_run_status", metadata.get("run_status", "VALID"))
+    )
+    investment = build_investment_ranking(full, run_status)
+    both_invalid = lt_status == "INVALID" and st_status == "INVALID"
+    investment_normal = directory / "investment_ranking.csv"
+    investment_diagnostic = directory / "investment_ranking_invalid_diagnostic.csv"
+    atomic_csv(
+        investment,
+        investment_diagnostic if both_invalid else investment_normal,
+    )
+    stale_investment = investment_normal if both_invalid else investment_diagnostic
+    if stale_investment.exists():
+        stale_investment.unlink()
     atomic_csv(insufficient, directory / "insufficient_data.csv")
     atomic_csv(pd.DataFrame([metadata]), directory / "run_metadata.csv")
     (directory / "methodology.md").write_text(

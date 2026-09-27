@@ -59,6 +59,77 @@ ST_COLUMNS = [
     "st_top_negative_driver",
 ]
 
+INVESTMENT_RANKING_COLUMNS = [
+    # Identity and independent horizon rankings.
+    "symbol",
+    "company_name",
+    "index_name",
+    "sector",
+    "long_term_rank",
+    "long_term_rank_change_7d",
+    "long_term_score",
+    "long_term_score_change_7d",
+    "short_term_rank",
+    "short_term_rank_change_7d",
+    "short_term_score",
+    "short_term_score_change_7d",
+    "short_term_setup",
+    # Risk and confidence.
+    "risk_score",
+    "confidence_score",
+    # Existing analyst point-in-time history.
+    "target_mean",
+    "target_mean_change_7d_pct",
+    "target_mean_change_30d_pct",
+    "target_mean_change_90d_pct",
+    "target_median",
+    "target_median_change_7d_pct",
+    "target_median_change_30d_pct",
+    "target_median_change_90d_pct",
+    "revenue_0q_change_7d_pct",
+    "revenue_0q_change_30d_pct",
+    "revenue_0q_change_90d_pct",
+    "revenue_plus_1q_change_7d_pct",
+    "revenue_plus_1q_change_30d_pct",
+    "revenue_plus_1q_change_90d_pct",
+    "revenue_0y_change_30d_pct",
+    "revenue_0y_change_90d_pct",
+    "revenue_plus_1y_change_30d_pct",
+    "revenue_plus_1y_change_90d_pct",
+    # Long-term and short-term model components remain separate.
+    "quality_score",
+    "growth_score",
+    "valuation_score",
+    "expectations_long_score",
+    "long_trend_score",
+    "financial_safety_score",
+    "short_rs_score",
+    "setup_quality_score",
+    "expectations_short_score",
+    "volume_confirmation_score",
+    "technical_trend_score",
+    "event_timing_score",
+    # Current market context.
+    "current_price",
+    "return_20d_pct",
+    "return_60d_pct",
+    "return_126d_pct",
+    "distance_to_52w_high_pct",
+    # Compact data and history status.
+    "overall_data_status",
+    "price_data_status",
+    "analyst_cache_status",
+    "valuation_cache_status",
+    "fundamental_cache_status",
+    "targets_cache_status",
+    "revenue_estimate_cache_status",
+    "rank_history_status",
+    "long_term_score_history_status",
+    "short_term_score_history_status",
+    "long_term_rank_history_status",
+    "short_term_rank_history_status",
+]
+
 
 def _show(frame, columns, top):
     cols = [c for c in columns if c in frame]

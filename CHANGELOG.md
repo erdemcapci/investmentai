@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.5
+
+- Added `investment_ranking.csv` with Long-Term and Short-Term rankings side-by-side.
+- Exposed existing rank/score and analyst historical-change fields for easier filtering and comparison.
+- Preserved separate LT/ST ranking outputs and independent scoring semantics.
+- No scoring, validation, risk, confidence, cache, or history-semantic changes.
+
 ## 1.1.4
 
 - Added exchange-aware normalization for iShares STOXX local ticker formats.
