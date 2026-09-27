@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,9 +16,31 @@ import numpy as np
 import pandas as pd
 import requests
 
+from investment_ai.config import SP500_MIN_CONSTITUENTS, STOXX600_MIN_CONSTITUENTS
+
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-STOXX600_URL = "https://en.wikipedia.org/wiki/STOXX_Europe_600"
+STOXX600_ISHARES_URL = (
+    "https://www.ishares.com/ch/individual/en/products/251931/"
+    "ishares-stoxx-europe-600-ucits-etf-de-fund/1495092304805.ajax"
+    "?fileType=csv&fileName=EXSA_holdings&dataType=fund"
+)
+STOXX600_WIKIMEDIA_URL = (
+    "https://en.wikipedia.org/w/rest.php/v1/page/STOXX_Europe_600/html"
+)
 SUPPORTED_INDEXES = ("sp500", "stoxx600")
+WIKIMEDIA_HEADERS = {
+    "User-Agent": (
+        "InvestmentAI/1.1.3 "
+        "(https://github.com/erdemcapci/investmentai)"
+    ),
+    "Accept": "text/html",
+}
+DOWNLOAD_HEADERS = {
+    "User-Agent": (
+        "InvestmentAI/1.1.3 "
+        "(https://github.com/erdemcapci/investmentai)"
+    )
+}
 
 # Yahoo's European symbols use the primary exchange suffix.  The public STOXX
 # table exposes country and local ticker rather than a vendor-specific symbol.
@@ -132,18 +155,60 @@ def make_unique_columns(columns: Iterable[Any]) -> list[str]:
     return result
 
 
+def _validated_constituents(
+    frame: pd.DataFrame, index_name: str, minimum_rows: int
+) -> pd.DataFrame:
+    """Reject partial/malformed downloads before they can replace a good cache."""
+    required = {"symbol", "security", "index_name"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"{index_name} data is missing columns: {sorted(missing)}")
+    result = frame.copy()
+    result["symbol"] = result["symbol"].astype(str).str.strip()
+    result = result[
+        result["symbol"].ne("")
+        & result["symbol"].str.upper().ne("NAN")
+        & result["security"].notna()
+    ].reset_index(drop=True)
+    if len(result) < minimum_rows:
+        raise ValueError(
+            f"{index_name} returned {len(result)} rows; minimum is {minimum_rows}"
+        )
+    return result
+
+
+def _write_constituent_cache(frame: pd.DataFrame, cache_path: Path) -> None:
+    """Atomically replace a constituent cache only after caller validation."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    frame.to_csv(temporary, index=False)
+    with temporary.open("rb") as handle:
+        os.fsync(handle.fileno())
+    os.replace(temporary, cache_path)
+
+
+def _read_valid_cache(
+    cache_path: Path, index_name: str, minimum_rows: int
+) -> pd.DataFrame | None:
+    if not cache_path.exists():
+        return None
+    try:
+        cached = _validated_constituents(
+            pd.read_csv(cache_path), index_name, minimum_rows
+        )
+    except Exception as exc:
+        logging.warning("Ignoring invalid constituent cache %s: %s", cache_path, exc)
+        return None
+    cached["constituent_source_cache_used"] = True
+    logging.warning("Using cached constituent list: %s", cache_path)
+    return cached
+
+
 def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
     """Fetch current constituents; fall back to the last cached list."""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 Chrome/150 Safari/537.36"
-        )
-    }
-
     try:
         logging.info("Downloading current S&P 500 constituent list...")
-        response = requests.get(SP500_URL, headers=headers, timeout=45)
+        response = requests.get(SP500_URL, headers=WIKIMEDIA_HEADERS, timeout=45)
         response.raise_for_status()
         tables = pd.read_html(StringIO(response.text), match="Symbol")
         if not tables:
@@ -178,16 +243,19 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
         normalized["constituent_source_cache_used"] = False
         normalized = normalized.drop_duplicates("symbol").reset_index(drop=True)
 
-        normalized.to_csv(cache_path, index=False)
+        normalized = _validated_constituents(
+            normalized, "S&P 500", SP500_MIN_CONSTITUENTS
+        )
+        _write_constituent_cache(normalized, cache_path)
         logging.info("Loaded %s S&P 500 listings.", len(normalized))
         return normalized
 
     except Exception as exc:
         logging.warning("Could not refresh constituent list: %s", exc)
-        if cache_path.exists():
-            cached = pd.read_csv(cache_path)
-            cached["constituent_source_cache_used"] = True
-            logging.warning("Using cached constituent list: %s", cache_path)
+        cached = _read_valid_cache(
+            cache_path, "S&P 500", SP500_MIN_CONSTITUENTS
+        )
+        if cached is not None:
             return cached
         raise RuntimeError(
             "S&P 500 list could not be downloaded and no cached list exists."
@@ -222,52 +290,99 @@ def _find_stoxx_table(tables: list[pd.DataFrame]) -> pd.DataFrame:
     raise ValueError("No STOXX Europe 600 constituent table was found")
 
 
+def _normalize_stoxx(raw: pd.DataFrame) -> pd.DataFrame:
+    raw = raw.copy()
+    raw.columns = [clean_column_name(c) for c in raw.columns]
+    company_column = next(
+        (c for c in ("company", "company_name", "name") if c in raw), None
+    )
+    ticker_column = next(
+        (c for c in ("ticker", "issuer_ticker") if c in raw), None
+    )
+    country_column = next(
+        (c for c in ("country", "location") if c in raw), None
+    )
+    if not company_column or not ticker_column or not country_column:
+        raise ValueError("STOXX source is missing company, ticker, or country")
+    if "asset_class" in raw:
+        raw = raw[raw["asset_class"].astype(str).str.casefold().eq("equity")]
+    industry_column = next(
+        (c for c in ("industry", "icb_sector", "sector") if c in raw), None
+    )
+    fetched_at = utc_now_iso()
+    normalized = pd.DataFrame(
+        {
+            "symbol": raw[ticker_column].astype(str).str.strip(),
+            "source_symbol": raw[ticker_column].astype(str).str.strip(),
+            "stoxx_ticker": raw[ticker_column].astype(str).str.strip(),
+            "security": raw[company_column],
+            "gics_sector": raw[industry_column] if industry_column else pd.NA,
+            "country": raw[country_column],
+            "exchange": raw["exchange"] if "exchange" in raw else pd.NA,
+            "isin": raw["isin"] if "isin" in raw else pd.NA,
+            "index_name": "STOXX Europe 600",
+            "constituent_list_fetched_at_utc": fetched_at,
+            "constituent_source_cache_used": False,
+        }
+    )
+    return normalized.drop_duplicates(
+        ["source_symbol", "country", "security"]
+    ).reset_index(drop=True)
+
+
+def _parse_ishares_stoxx(text: str) -> pd.DataFrame:
+    # The first line is the holdings date and the second is blank/non-breaking space.
+    return _normalize_stoxx(pd.read_csv(StringIO(text), skiprows=2))
+
+
+def _parse_wikimedia_stoxx(text: str) -> pd.DataFrame:
+    return _normalize_stoxx(_find_stoxx_table(pd.read_html(StringIO(text))))
+
+
 def fetch_stoxx600_constituents(cache_path: Path) -> pd.DataFrame:
-    """Fetch raw STOXX members without pre-empting authoritative resolution."""
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; InvestmentAI/1.0)"}
-    try:
-        response = requests.get(STOXX600_URL, headers=headers, timeout=45)
-        response.raise_for_status()
-        raw = _find_stoxx_table(pd.read_html(StringIO(response.text)))
-        company_column = "company" if "company" in raw else "company_name"
-        industry_column = next(
-            (c for c in ("industry", "icb_sector", "sector") if c in raw), None
-        )
-        rows = []
-        for _, item in raw.iterrows():
-            source_symbol = str(item.get("ticker", "")).strip()
-            rows.append(
-                {
-                    # This is deliberately the source ticker. SymbolResolver is
-                    # the only authority allowed to produce a Yahoo symbol.
-                    "symbol": source_symbol,
-                    "source_symbol": source_symbol,
-                    "stoxx_ticker": source_symbol,
-                    "security": item[company_column],
-                    "gics_sector": item[industry_column] if industry_column else pd.NA,
-                    "country": item["country"],
-                    "exchange": item.get("exchange", pd.NA),
-                    "isin": item.get("isin", pd.NA),
-                    "index_name": "STOXX Europe 600",
-                    "constituent_list_fetched_at_utc": utc_now_iso(),
-                    "constituent_source_cache_used": False,
-                }
+    """Fetch, validate and atomically cache the complete STOXX universe."""
+    failures = []
+    sources = (
+        (STOXX600_ISHARES_URL, DOWNLOAD_HEADERS, _parse_ishares_stoxx, "iShares"),
+        (
+            STOXX600_WIKIMEDIA_URL,
+            WIKIMEDIA_HEADERS,
+            _parse_wikimedia_stoxx,
+            "Wikimedia",
+        ),
+    )
+    for url, headers, parser, source_name in sources:
+        try:
+            response = requests.get(url, headers=headers, timeout=45)
+            response.raise_for_status()
+            normalized = _validated_constituents(
+                parser(response.text),
+                "STOXX Europe 600",
+                STOXX600_MIN_CONSTITUENTS,
             )
-        if not rows:
-            raise ValueError("No STOXX Europe 600 constituents were found")
-        normalized = pd.DataFrame(rows).drop_duplicates("source_symbol").reset_index(drop=True)
-        normalized.to_csv(cache_path, index=False)
-        logging.info("Loaded %s STOXX Europe 600 listings.", len(normalized))
-        return normalized
-    except Exception as exc:
-        logging.warning("Could not refresh STOXX Europe 600 list: %s", exc)
-        if cache_path.exists():
-            cached = pd.read_csv(cache_path)
-            cached["constituent_source_cache_used"] = True
-            return cached
-        raise RuntimeError(
-            "STOXX Europe 600 list could not be downloaded and no cached list exists."
-        ) from exc
+            _write_constituent_cache(normalized, cache_path)
+            logging.info(
+                "Loaded %s STOXX Europe 600 listings from %s.",
+                len(normalized),
+                source_name,
+            )
+            return normalized
+        except Exception as exc:
+            failures.append(f"{source_name}: {exc}")
+            logging.warning(
+                "Could not refresh STOXX Europe 600 list from %s: %s",
+                source_name,
+                exc,
+            )
+    cached = _read_valid_cache(
+        cache_path, "STOXX Europe 600", STOXX600_MIN_CONSTITUENTS
+    )
+    if cached is not None:
+        return cached
+    raise RuntimeError(
+        "STOXX Europe 600 list could not be downloaded and no valid cached "
+        f"list exists ({'; '.join(failures)})."
+    )
 
 
 def combine_index_constituents(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:

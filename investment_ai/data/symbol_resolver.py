@@ -108,7 +108,12 @@ class SymbolResolver:
             "SELECT * FROM security_mappings WHERE source_index=? AND source_symbol=? AND country=?",
             (source_index, source_symbol, country),
         ).fetchone()
-        if persisted and persisted[9] == "VERIFIED":
+        persisted_invalid = bool(
+            persisted
+            and persisted[9] == "UNRESOLVED"
+            and persisted[10] == "YAHOO_INVALID_SYMBOL"
+        )
+        if persisted and (persisted[9] == "VERIFIED" or persisted_invalid):
             values = dict(
                 zip(
                     [
@@ -135,10 +140,11 @@ class SymbolResolver:
                 exchange,
                 isin,
                 values["canonical_symbol"],
-                "PERSISTED_VERIFIED",
-                "VERIFIED",
+                "PERSISTED_VERIFIED" if persisted[9] == "VERIFIED" else values["mapping_method"],
+                values["mapping_status"],
                 values["mapping_confidence"],
                 values["verified_at_utc"],
+                values["mapping_error"],
             )
         candidate, method = _candidate(source_symbol, country)
         status, confidence, verified, error = "UNRESOLVED", 0.0, None, None
@@ -223,6 +229,52 @@ class SymbolResolver:
                 verified,
                 now,
                 error,
+            ),
+        )
+        self.db.commit()
+        return result
+
+    def mark_invalid_yahoo(
+        self, mapping: Mapping[str, Any], error: str
+    ) -> SymbolMapping:
+        """Persist a definitive provider rejection so later runs make no calls."""
+        current = SymbolMapping(
+            **{
+                field: mapping.get(field)
+                for field in SymbolMapping.__dataclass_fields__
+            }
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        result = SymbolMapping(
+            current.security_id,
+            current.listing_id,
+            current.source_index,
+            current.source_symbol,
+            current.company_name,
+            current.country,
+            current.exchange,
+            current.isin,
+            current.canonical_yahoo_symbol,
+            "YAHOO_INVALID_SYMBOL",
+            "UNRESOLVED",
+            0.0,
+            None,
+            str(error)[:1000],
+        )
+        self.db.execute(
+            """UPDATE security_mappings SET mapping_status=?,mapping_method=?,
+            mapping_confidence=?,verified_at_utc=?,last_seen_at_utc=?,mapping_error=?
+            WHERE source_index=? AND source_symbol=? AND country=?""",
+            (
+                result.mapping_status,
+                result.mapping_method,
+                result.mapping_confidence,
+                result.mapping_verified_at_utc,
+                now,
+                result.mapping_error,
+                result.source_index,
+                result.source_symbol,
+                result.country,
             ),
         )
         self.db.commit()

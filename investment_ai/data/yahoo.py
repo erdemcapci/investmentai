@@ -33,6 +33,20 @@ from investment_ai.features.fundamentals import derive_fundamentals
 from investment_ai.features.valuation import parse_valuation
 
 RATE_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
+DEFINITIVE_INVALID_MARKERS = (
+    "404 client error",
+    "http error 404",
+    "no timezone found",
+    "not found for symbol",
+    "possibly delisted",
+    "quote not found",
+    "symbol may be delisted",
+)
+
+
+def is_definitively_invalid_yahoo_error(error: Any) -> bool:
+    text = str(error).casefold()
+    return any(marker in text for marker in DEFINITIVE_INVALID_MARKERS)
 
 
 def currency_metadata(info: dict[str, Any]) -> dict[str, Any]:
@@ -66,6 +80,8 @@ def call_with_retry(function: Callable[[], Any], attempts: int = 3) -> Any:
             return function()
         except Exception as exc:
             error = exc
+            if is_definitively_invalid_yahoo_error(exc):
+                break
             if attempt + 1 < attempts:
                 rate_limited = any(
                     marker in str(exc).lower() for marker in RATE_MARKERS
@@ -122,15 +138,22 @@ class YahooClient:
     def _provider_info(self, symbol: str, ticker: Any | None = None):
         """Fetch the listing and analysis info superset through one cache tier."""
         ticker = ticker or yf.Ticker(symbol)
+
+        def fetch_info() -> dict[str, Any]:
+            raw = call_with_retry(ticker.get_info) or {}
+            quote_type = str(raw.get("quoteType", "")).upper()
+            if quote_type and quote_type not in {"EQUITY", "ETF"}:
+                raise ValueError(
+                    "definitively invalid Yahoo mapping: "
+                    f"unsupported quoteType={quote_type}"
+                )
+            return {key: value for key, value in raw.items() if key in self.INFO_FIELDS}
+
         return self.cache.get_or_fetch(
             "provider_info",
             symbol,
             ANALYST_TTL_HOURS,
-            lambda: {
-                key: value
-                for key, value in (call_with_retry(ticker.get_info) or {}).items()
-                if key in self.INFO_FIELDS
-            },
+            fetch_info,
             FORCE_REFRESH,
             _meaningful,
         )
@@ -183,6 +206,52 @@ class YahooClient:
         component_statuses = []
         fetched_times = []
         errors = []
+        info, info_status = self._provider_info(symbol, ticker)
+        if info_status == ERROR:
+            error = str(info.get("error", "provider info unavailable"))[:1000]
+            definitive = (
+                is_definitively_invalid_yahoo_error(error)
+                or "definitively invalid yahoo mapping" in error.casefold()
+            )
+            reason = "INVALID_YAHOO_MAPPING" if definitive else "PROVIDER_INFO_ERROR"
+            for name in self.ANALYST_COMPONENTS:
+                result[f"{name}_success"] = False
+                result[f"{name}_cache_status"] = ERROR
+                result[f"{name}_fetched_at_utc"] = None
+                result[f"{name}_error_message"] = f"skipped: {reason}"
+            result.update(
+                {
+                    "earnings_dates_success": False,
+                    "earnings_dates_cache_status": ERROR,
+                    "earnings_dates_fetched_at_utc": None,
+                    "earnings_dates_error_message": f"skipped: {reason}",
+                    "info_success": False,
+                    "info_cache_status": ERROR,
+                    "info_fetched_at_utc": info.get("fetched_at_utc"),
+                    "info_error_message": error,
+                    "analyst_fetched_at_utc": None,
+                    "analyst_cache_status": ERROR,
+                    "valuation_cache_status": ERROR,
+                    "fundamental_cache_status": ERROR,
+                    "valuation_fetched_at_utc": None,
+                    "fundamentals_fetched_at_utc": None,
+                    "valuation_error_message": f"skipped: {reason}",
+                    "fundamental_error_message": f"skipped: {reason}",
+                    "analyst_component_error_count": len(self.ANALYST_COMPONENTS) + 1,
+                    "provider_success": 0.0,
+                    "definitive_invalid_mapping": definitive,
+                    "provider_short_circuit_reason": reason,
+                    "data_errors": f"provider_info:{error}",
+                }
+            )
+            for field in self.INFO_FIELDS:
+                result[f"provider_info_{field}"] = None
+            result.update(currency_metadata({}))
+            return result
+
+        info_data = info.get("data", {})
+        result["definitive_invalid_mapping"] = False
+        result["provider_short_circuit_reason"] = None
         for name, (endpoint, parser) in self.ANALYST_COMPONENTS.items():
             item, status = self._component(ticker, symbol, name, endpoint, parser)
             result.update(item.get("data", {}))
@@ -211,8 +280,6 @@ class YahooClient:
         component_statuses.append(date_status)
         if dates.get("fetched_at_utc"):
             fetched_times.append(dates["fetched_at_utc"])
-        info, info_status = self._provider_info(symbol, ticker)
-        info_data = info.get("data", {})
         for field in self.INFO_FIELDS:
             result[f"provider_info_{field}"] = info_data.get(field)
         result["sector_raw_yahoo"] = info_data.get("sector")

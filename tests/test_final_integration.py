@@ -54,12 +54,44 @@ def test_raw_stoxx_does_not_drop_unsupported_country(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr("investment_ai.data.constituents.requests.get", lambda *a, **k: Response())
+    monkeypatch.setattr("investment_ai.data.constituents.STOXX600_MIN_CONSTITUENTS", 1)
     monkeypatch.setattr("investment_ai.data.constituents.pd.read_html", lambda *_a, **_k: [pd.DataFrame({
         "Company": ["Known", "Unsupported"], "Ticker": ["AIR", "XYZ"],
         "Country": ["France", "Atlantis"],
     })])
     result = fetch_stoxx600_constituents(tmp_path / "stoxx.csv")
     assert result.source_symbol.tolist() == ["AIR", "XYZ"]
+
+
+def test_partial_stoxx_download_cannot_replace_last_known_good(monkeypatch, tmp_path):
+    cache_path = tmp_path / "stoxx.csv"
+    good = pd.DataFrame({
+        "symbol": [f"S{i}" for i in range(560)],
+        "source_symbol": [f"S{i}" for i in range(560)],
+        "security": [f"Company {i}" for i in range(560)],
+        "country": ["Germany"] * 560,
+        "index_name": ["STOXX Europe 600"] * 560,
+        "constituent_source_cache_used": [False] * 560,
+    })
+    good.to_csv(cache_path, index=False)
+    before = cache_path.read_bytes()
+
+    class Response:
+        text = "partial"
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("investment_ai.data.constituents.requests.get", lambda *a, **k: Response())
+    monkeypatch.setattr(
+        "investment_ai.data.constituents._parse_ishares_stoxx", lambda *_: good.iloc[:3]
+    )
+    monkeypatch.setattr(
+        "investment_ai.data.constituents._parse_wikimedia_stoxx", lambda *_: good.iloc[:4]
+    )
+    result = fetch_stoxx600_constituents(cache_path)
+    assert len(result) == 560
+    assert result.constituent_source_cache_used.all()
+    assert cache_path.read_bytes() == before
 
 
 def test_currency_metadata_and_fcf_guard():

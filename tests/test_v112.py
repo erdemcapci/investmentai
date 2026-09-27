@@ -77,6 +77,46 @@ def test_resolver_and_provider_share_info_cache(monkeypatch, tmp_path):
     assert result["trading_currency"] == "EUR"
 
 
+def test_invalid_yahoo_symbol_stops_before_component_cascade(monkeypatch, tmp_path):
+    calls = []
+
+    class Ticker:
+        def get_info(self):
+            calls.append("info")
+            raise RuntimeError("HTTP Error 404: quote not found for symbol")
+
+        def __getattr__(self, name):
+            raise AssertionError(f"component call was not short-circuited: {name}")
+
+    monkeypatch.setattr("investment_ai.data.yahoo.yf.Ticker", lambda _symbol: Ticker())
+    result = YahooClient(JsonCache(tmp_path)).fetch_symbol("BAD.PA")
+    assert calls == ["info"]
+    assert result["definitive_invalid_mapping"] is True
+    assert result["provider_short_circuit_reason"] == "INVALID_YAHOO_MAPPING"
+    assert result["provider_success"] == 0
+
+
+def test_rate_limit_stops_component_cascade_without_invalidating_mapping(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    class Ticker:
+        def get_info(self):
+            calls.append("info")
+            raise RuntimeError("Too Many Requests. Rate limited. Try after a while.")
+
+        def __getattr__(self, name):
+            raise AssertionError(f"component call was not short-circuited: {name}")
+
+    monkeypatch.setattr("investment_ai.data.yahoo.yf.Ticker", lambda _symbol: Ticker())
+    monkeypatch.setattr("investment_ai.data.yahoo.time.sleep", lambda *_: None)
+    result = YahooClient(JsonCache(tmp_path)).fetch_symbol("AIR.PA")
+    assert calls == ["info", "info", "info"]
+    assert result["definitive_invalid_mapping"] is False
+    assert result["provider_short_circuit_reason"] == "PROVIDER_INFO_ERROR"
+
+
 def test_range_download_retries_omission_and_reports_permanent_missing(monkeypatch):
     calls = []
 

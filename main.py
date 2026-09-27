@@ -188,6 +188,22 @@ def _verify_provider_mappings(universe: pd.DataFrame, provider: pd.DataFrame) ->
             if row.symbol not in by_symbol.index:
                 continue
             captured = by_symbol.loc[row.symbol]
+            invalid_flag = captured.get("definitive_invalid_mapping", False)
+            definitively_invalid = invalid_flag is True or (
+                isinstance(invalid_flag, str)
+                and invalid_flag.strip().casefold() in {"1", "true", "yes"}
+            )
+            if definitively_invalid:
+                mapping = resolver.mark_invalid_yahoo(
+                    row.to_dict(),
+                    str(
+                        captured.get("info_error_message")
+                        or "Yahoo rejected the candidate symbol"
+                    ),
+                )
+                for key, value in mapping.as_dict().items():
+                    result.at[index, key] = value
+                continue
             if not bool(captured.get("info_success", False)):
                 continue
             metadata = {

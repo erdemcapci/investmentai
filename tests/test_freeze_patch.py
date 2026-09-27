@@ -71,6 +71,20 @@ def test_persisted_verified_mapping_needs_no_lookup(tmp_path):
     assert resolver.resolve("STOXX Europe 600", "SAP", "SAP SE", "Germany", isin="DE1").mapping_status == "VERIFIED"
 
 
+def test_persisted_invalid_yahoo_mapping_needs_no_lookup(tmp_path):
+    db = sqlite3.connect(tmp_path / "m.db")
+    resolver = SymbolResolver(db)
+    first = resolver.resolve("STOXX Europe 600", "BAD", "Bad Listing", "France")
+    rejected = resolver.mark_invalid_yahoo(first.as_dict(), "HTTP Error 404")
+    assert rejected.mapping_status == "UNRESOLVED"
+    assert rejected.mapping_method == "YAHOO_INVALID_SYMBOL"
+    resolver.metadata_lookup = lambda *_: (_ for _ in ()).throw(AssertionError())
+    repeated = resolver.resolve("STOXX Europe 600", "BAD", "Bad Listing", "France")
+    assert repeated.mapping_status == "UNRESOLVED"
+    assert repeated.mapping_method == "YAHOO_INVALID_SYMBOL"
+    assert repeated.mapping_error == "HTTP Error 404"
+
+
 def test_price_freshness_metrics_drive_common_and_st_health():
     metrics = {"price_present_coverage_pct": 100, "price_coverage_pct": 100,
                "price_fresh_coverage_pct": 50}
