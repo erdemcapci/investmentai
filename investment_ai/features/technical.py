@@ -318,15 +318,26 @@ def event_timing_score(days_to: Any, days_since: Any = np.nan) -> float:
     return np.nan
 
 
+def _completed_closes(series: pd.Series, now: datetime | None) -> pd.Series:
+    """Positive closes, excluding a bar stamped today that may still be forming."""
+    close = pd.to_numeric(series, errors="coerce").dropna()
+    close = close[close > 0]
+    close.index = pd.to_datetime(close.index, utc=True)
+    today = pd.Timestamp(now or datetime.now(timezone.utc)).tz_convert("UTC").normalize()
+    return close[close.index < today].sort_index()
+
+
 def earnings_reaction(
-    stock: pd.Series, benchmark: pd.Series | None, event: Any
+    stock: pd.Series, benchmark: pd.Series | None, event: Any,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Two-session announcement return around an earnings date.
 
     The window runs from the last close strictly before the announcement day to
     the close of the next session after it, so both pre-open and post-close
     reports are captured.  Excess return subtracts the assigned benchmark over
-    exactly the same dates.
+    exactly the same dates.  Like ``price_features``, a bar stamped today is
+    ignored because an intraday run would otherwise read a half-day price.
     """
     empty = {
         "earnings_reaction_pct": np.nan,
@@ -336,12 +347,9 @@ def earnings_reaction(
     timestamp = pd.to_datetime(event, utc=True, errors="coerce")
     if stock is None or pd.isna(timestamp):
         return empty
-    close = pd.to_numeric(stock, errors="coerce").dropna()
-    close = close[close > 0]
+    close = _completed_closes(stock, now)
     if close.empty:
         return empty
-    close.index = pd.to_datetime(close.index, utc=True)
-    close = close.sort_index()
     day = timestamp.normalize()
     before = close[close.index < day]
     after = close[close.index >= day]
@@ -351,8 +359,7 @@ def earnings_reaction(
     reaction = (close.loc[end] / close.loc[start] - 1) * 100
     excess = np.nan
     if benchmark is not None:
-        bench = pd.to_numeric(benchmark, errors="coerce").dropna()
-        bench.index = pd.to_datetime(bench.index, utc=True)
+        bench = _completed_closes(benchmark, now)
         if start in bench.index and end in bench.index and bench.loc[start] > 0:
             excess = reaction - (bench.loc[end] / bench.loc[start] - 1) * 100
     return {

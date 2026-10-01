@@ -458,3 +458,18 @@ def test_run_logger_does_not_duplicate_through_root(tmp_path):
     import logging
 
     assert logging.getLogger("investment_ai").propagate is False
+
+
+def test_earnings_reaction_ignores_a_bar_that_may_still_be_forming():
+    from datetime import datetime, timezone
+
+    dates = pd.bdate_range("2026-01-05", periods=4, tz="UTC")
+    stock = pd.Series([100, 100, 110, 150], index=dates, dtype=float)
+    event = "2026-01-07 21:00:00+00:00"  # after the 7 Jan close
+    # Run during the 8 Jan session: the 8 Jan bar (150) is partial and ignored.
+    intraday = earnings_reaction(stock, None, event, now=datetime(2026, 1, 8, 15, tzinfo=timezone.utc))
+    assert intraday["earnings_reaction_pct"] == pytest.approx(10)
+    assert intraday["earnings_reaction_sessions"] == 1
+    # The next day the 8 Jan close is complete and closes the two-session window.
+    complete = earnings_reaction(stock, None, event, now=datetime(2026, 1, 9, 1, tzinfo=timezone.utc))
+    assert complete["earnings_reaction_pct"] == pytest.approx(50)
