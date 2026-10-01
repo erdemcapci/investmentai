@@ -16,6 +16,10 @@
   model, so a model upgrade never appears as a rank jump.
 - Removed unused helpers (legacy constituent utilities, `is_fresh`,
   `pending_prediction_symbols`, unused constants).
+- Annual-only fundamentals cached before 1.2.0 stay valid and move to
+  quarterly data at normal TTL expiry; forcing every entry to refresh at once
+  hit Yahoo rate limits and removed the stale fallback.
+- Run log messages no longer print twice.
 
 ## 1.2.0 (scoring model 3.2.0)
 
@@ -36,7 +40,7 @@
   sector-capped `action_list.csv` that applies the long-term filter to short-term
   timing.
 - New `python main.py --backtest` walk-forward harness for the price signals.
-- The fundamentals cache refreshes once to capture quarterly statements.
+- Fundamentals gain quarterly statements as cache entries refresh.
 - Tests no longer write run folders, caches or history into the working tree.
 - Backtest: `--backtest-earnings` replays the Earnings Drift pillar from Yahoo
   report history; strategy simulation compares gated and ungated short-term

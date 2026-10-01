@@ -422,3 +422,39 @@ def test_rank_changes_only_compare_runs_of_the_same_model(tmp_path):
     assert missing["long_term_rank"] is None
     assert missing["long_term_rank_history_status"] == "NO_VALID_HISTORICAL_VALUE"
     store.close()
+
+
+def test_pre_ttm_fundamentals_cache_stays_a_fallback(tmp_path, monkeypatch):
+    """Legacy annual-only entries must never leave a symbol without data."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from investment_ai.config import CACHE_SCHEMA_VERSION
+    from investment_ai.data.cache import JsonCache
+    from investment_ai.data.yahoo import _meaningful
+    from investment_ai.status import FRESH_CACHE, STALE_FALLBACK
+
+    cache = JsonCache(tmp_path)
+    for symbol, age in (("FRESH", 1), ("EXPIRED", 500)):
+        cache._path("fundamentals", symbol).write_text(json.dumps({
+            "cache_schema_version": CACHE_SCHEMA_VERSION,
+            "fetched_at_utc": (datetime.now(timezone.utc) - timedelta(hours=age)).isoformat(),
+            "data": {"return_on_equity": 12.0},
+        }))
+
+    def rate_limited():
+        raise RuntimeError("Too Many Requests")
+
+    item, status = cache.get_or_fetch("fundamentals", "FRESH", 168, rate_limited, validator=_meaningful)
+    assert status == FRESH_CACHE and item["data"]["return_on_equity"] == 12.0
+    item, status = cache.get_or_fetch("fundamentals", "EXPIRED", 168, rate_limited, validator=_meaningful)
+    assert status == STALE_FALLBACK and item["data"]["return_on_equity"] == 12.0
+
+
+def test_run_logger_does_not_duplicate_through_root(tmp_path):
+    from investment_ai.runtime import configure_logging
+
+    configure_logging(tmp_path, "r")
+    import logging
+
+    assert logging.getLogger("investment_ai").propagate is False

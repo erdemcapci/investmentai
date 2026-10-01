@@ -338,8 +338,11 @@ class YahooClient:
             # financial/non-financial applicability decisions.
             lambda: self._fundamentals(ticker, info_data.get("sector") or sector),
             FORCE_REFRESH,
-            # Pre-3.2 entries lack the basis marker and are refreshed once.
-            lambda data: _meaningful(data) and "fundamentals_basis" in data,
+            # Pre-3.2 entries (annual only, no basis marker) stay valid: they
+            # pick up quarterly data when their TTL expires, and remain a stale
+            # fallback if that refresh is rate-limited.  Forcing every entry to
+            # refresh at once triggered Yahoo rate limits.
+            _meaningful,
         )
         result.update(valuation.get("data", {}))
         result.update(fundamentals.get("data", {}))

@@ -261,6 +261,9 @@ def configure_logging(directory: Path, run_id: str) -> logging.Logger:
     logger = logging.getLogger("investment_ai")
     logger.handlers.clear()
     logger.setLevel(logging.INFO)
+    # Libraries such as yfinance configure the root logger; without this every
+    # message would print twice.
+    logger.propagate = False
     formatter = logging.Formatter(
         f"%(asctime)s %(levelname)s run_id={run_id} symbol=%(symbol)s component=%(component)s %(message)s"
     )
