@@ -8,6 +8,26 @@ from investment_ai.features.peers import resolve_metric_peers
 from investment_ai.scoring.common import curve, weighted, percentile, safe_nanmean
 
 
+SKIP_SESSIONS = 21
+# Relative-strength keys and the return metric each one ranks.
+RS_METRICS = {
+    "20d": "return_20d_pct",
+    "60d": "return_60d_pct",
+    "126d": "return_126d_pct",
+    "252d": "return_252d_pct",
+    "mom_6_1": "momentum_6_1_pct",
+    "mom_12_1": "momentum_12_1_pct",
+}
+
+
+def model_rs(row: dict[str, Any], key: str) -> float:
+    """Relative-strength percentile on the model basis, falling back to raw."""
+    value = row.get(f"model_rs_{key}_percentile")
+    if value is None or pd.isna(value):
+        value = row.get(f"rs_{key}_percentile")
+    return np.nan if value is None else value
+
+
 def _ret(s: pd.Series, n: int) -> float:
     return (
         (s.iloc[-1] / s.iloc[-n - 1] - 1) * 100
@@ -56,6 +76,14 @@ def price_features(history: pd.DataFrame, now: datetime | None = None) -> dict[s
     }
     for n in (1, 2, 5, 20, 60, 126, 252):
         out[f"return_{n}d_pct"] = _ret(close, n)
+    # Skip-month momentum: the most recent month is excluded because it tends
+    # to reverse, while 6- and 12-month trends tend to persist.
+    for key, lookback in (("6_1", 126), ("12_1", 252)):
+        out[f"momentum_{key}_pct"] = (
+            (close.iloc[-SKIP_SESSIONS - 1] / close.iloc[-lookback - 1] - 1) * 100
+            if len(close) > lookback
+            else np.nan
+        )
     for n in (20, 50, 200):
         ma = close.tail(n).mean() if len(close) >= n else np.nan
         out[f"ma_{n}"] = ma
@@ -93,12 +121,11 @@ def price_features(history: pd.DataFrame, now: datetime | None = None) -> dict[s
 
 def add_relative_strength(frame: pd.DataFrame, minimum_peers: int = MIN_PEERS) -> pd.DataFrame:
     result = frame.copy()
-    for n in (20, 60, 126, 252):
-        result[f"rs_{n}d_percentile"] = np.nan
-        result[f"rs_{n}d_peer_method"] = "universe"
-        result[f"rs_{n}d_peer_count"] = 0
-        result[f"rs_{n}d_peer_index"] = ""
-        metric = f"return_{n}d_pct"
+    for key, metric in RS_METRICS.items():
+        result[f"rs_{key}_percentile"] = np.nan
+        result[f"rs_{key}_peer_method"] = "universe"
+        result[f"rs_{key}_peer_count"] = 0
+        result[f"rs_{key}_peer_index"] = ""
         if metric not in result:
             continue
         for row_index in result.index:
@@ -106,12 +133,46 @@ def add_relative_strength(frame: pd.DataFrame, minimum_peers: int = MIN_PEERS) -
                 result, row_index, metric, minimum_peers
             )
             ranks = percentile(result.loc[peers, metric])
-            result.at[row_index, f"rs_{n}d_peer_method"] = method
-            result.at[row_index, f"rs_{n}d_peer_count"] = len(peers)
-            result.at[row_index, f"rs_{n}d_peer_index"] = peer_index
+            result.at[row_index, f"rs_{key}_peer_method"] = method
+            result.at[row_index, f"rs_{key}_peer_count"] = len(peers)
+            result.at[row_index, f"rs_{key}_peer_index"] = peer_index
             if row_index in ranks.index:
-                result.at[row_index, f"rs_{n}d_percentile"] = ranks.loc[row_index]
+                result.at[row_index, f"rs_{key}_percentile"] = ranks.loc[row_index]
     return result
+
+
+def add_model_relative_strength(frame: pd.DataFrame, basis: str = "benchmark") -> pd.DataFrame:
+    """Choose the relative-strength basis consumed by the scoring models.
+
+    ``benchmark`` uses percentiles of excess return over the assigned regional
+    index so that a strong US or European market week does not lift every
+    member of that region; a security without benchmark data keeps its raw
+    percentile and is labelled ``RAW_FALLBACK``.
+    """
+    result = frame.copy()
+    used_benchmark = pd.Series(False, index=result.index)
+    for key in RS_METRICS:
+        raw = pd.to_numeric(
+            result.get(f"rs_{key}_percentile", pd.Series(np.nan, index=result.index)),
+            errors="coerce",
+        )
+        excess = pd.to_numeric(
+            result.get(f"benchmark_rs_{key}_percentile", pd.Series(np.nan, index=result.index)),
+            errors="coerce",
+        )
+        if basis == "benchmark":
+            result[f"model_rs_{key}_percentile"] = excess.combine_first(raw)
+            used_benchmark |= excess.notna()
+        else:
+            result[f"model_rs_{key}_percentile"] = raw
+    result["rs_basis"] = np.where(
+        used_benchmark, "BENCHMARK_EXCESS", "RAW" if basis == "raw" else "RAW_FALLBACK"
+    )
+    return result
+
+
+PULLBACK_THRESHOLD = 65
+BREAKOUT_THRESHOLD = 65
 
 
 def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
@@ -119,8 +180,11 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
         row.get("drawdown_from_20d_high_pct"),
         [(-30, 0), (-12, 45), (-6, 100), (-2, 75), (0, 35)],
     )
+    # An orderly pullback day: mild weakness or a flat close scores best, a
+    # crash day or a large up day (short-term reversal risk) scores worst.
     stability = curve(
-        row.get("return_1d_pct"), [(-8, 0), (-2, 35), (0, 80), (2, 100), (6, 45)]
+        row.get("return_1d_pct"),
+        [(-8, 0), (-3, 50), (-1, 90), (0.5, 100), (2, 70), (6, 20)],
     )
     trend = safe_nanmean(
         [
@@ -132,27 +196,27 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
             ),
         ]
     )
+    return_5d = row.get("return_5d_pct")
     pullvol = (
         curve(row.get("relative_volume_5d"), [(0.3, 100), (0.8, 80), (1.2, 45), (2, 0)])
-        if row.get("return_5d_pct", 0) < 0
+        if pd.notna(return_5d) and return_5d < 0
         else 50
     )
+    rs60 = model_rs(row, "60d")
     pull, cov, _ = weighted(
         {
             "controlled": controlled,
             "stability": stability,
             "trend": trend,
             "volume": pullvol,
-            "rs": row.get("rs_60d_percentile"),
-            "recent": stability,
+            "rs": rs60,
         },
         {
             "controlled": 0.25,
-            "stability": 0.20,
-            "trend": 0.20,
+            "stability": 0.15,
+            "trend": 0.25,
             "volume": 0.15,
-            "rs": 0.10,
-            "recent": 0.10,
+            "rs": 0.20,
         },
         0.70,
     )
@@ -189,11 +253,25 @@ def setup_scores(row: dict[str, Any]) -> dict[str, Any]:
         {"breakout": 0.30, "volume": 0.25, "momentum": 0.25, "alignment": 0.20},
         0.70,
     )
-    credible_pull = pd.notna(pull) and pull >= 55 and row.get("return_5d_pct", 0) <= 1
+    # A pullback is only a buying opportunity inside an established uptrend:
+    # above the 200-day average and at least median intermediate strength.
+    ma200 = row.get("price_vs_ma200_pct")
+    in_uptrend = (
+        pd.notna(ma200) and ma200 > 0 and (pd.isna(rs60) or rs60 >= 50)
+    )
+    credible_pull = (
+        pd.notna(pull)
+        and pull >= PULLBACK_THRESHOLD
+        and pd.notna(return_5d)
+        and return_5d <= 1
+        and in_uptrend
+    )
+    return_20d = row.get("return_20d_pct")
     credible_break = (
         pd.notna(breakout_score)
-        and breakout_score >= 55
-        and row.get("return_20d_pct", 0) > 0
+        and breakout_score >= BREAKOUT_THRESHOLD
+        and pd.notna(return_20d)
+        and return_20d > 0
     )
     if credible_pull and credible_break:
         setup = "MIXED"
@@ -238,3 +316,78 @@ def event_timing_score(days_to: Any, days_since: Any = np.nan) -> float:
     if pd.notna(days_since) and 0 <= days_since <= 3:
         return 40
     return np.nan
+
+
+def earnings_reaction(
+    stock: pd.Series, benchmark: pd.Series | None, event: Any
+) -> dict[str, Any]:
+    """Two-session announcement return around an earnings date.
+
+    The window runs from the last close strictly before the announcement day to
+    the close of the next session after it, so both pre-open and post-close
+    reports are captured.  Excess return subtracts the assigned benchmark over
+    exactly the same dates.
+    """
+    empty = {
+        "earnings_reaction_pct": np.nan,
+        "earnings_reaction_excess_pct": np.nan,
+        "earnings_reaction_sessions": 0,
+    }
+    timestamp = pd.to_datetime(event, utc=True, errors="coerce")
+    if stock is None or pd.isna(timestamp):
+        return empty
+    close = pd.to_numeric(stock, errors="coerce").dropna()
+    close = close[close > 0]
+    if close.empty:
+        return empty
+    close.index = pd.to_datetime(close.index, utc=True)
+    close = close.sort_index()
+    day = timestamp.normalize()
+    before = close[close.index < day]
+    after = close[close.index >= day]
+    if before.empty or after.empty:
+        return empty
+    start, end = before.index[-1], after.index[min(1, len(after) - 1)]
+    reaction = (close.loc[end] / close.loc[start] - 1) * 100
+    excess = np.nan
+    if benchmark is not None:
+        bench = pd.to_numeric(benchmark, errors="coerce").dropna()
+        bench.index = pd.to_datetime(bench.index, utc=True)
+        if start in bench.index and end in bench.index and bench.loc[start] > 0:
+            excess = reaction - (bench.loc[end] / bench.loc[start] - 1) * 100
+    return {
+        "earnings_reaction_pct": float(reaction),
+        "earnings_reaction_excess_pct": float(excess) if pd.notna(excess) else np.nan,
+        "earnings_reaction_sessions": int(min(2, len(after))),
+    }
+
+
+def earnings_drift_score(
+    surprise_pct: Any, reaction_pct: Any, days_since: Any
+) -> float:
+    """Post-earnings-announcement drift signal on a 0-100 scale.
+
+    Positive surprises confirmed by a positive announcement reaction tend to
+    keep drifting for weeks.  The signal decays linearly to neutral between 45
+    and 90 days after the report and is unavailable beyond that.
+    """
+    days = pd.to_numeric(days_since, errors="coerce")
+    if pd.isna(days) or days < 0 or days > 90:
+        return np.nan
+    combined, _, _ = weighted(
+        {
+            "surprise": curve(
+                surprise_pct,
+                [(-20, 0), (-5, 25), (0, 45), (5, 70), (15, 90), (30, 100)],
+            ),
+            "reaction": curve(
+                reaction_pct, [(-12, 0), (-4, 25), (0, 50), (4, 75), (12, 100)]
+            ),
+        },
+        {"surprise": 0.5, "reaction": 0.5},
+        0.5,
+    )
+    if pd.isna(combined):
+        return np.nan
+    decay = 1.0 if days <= 45 else max(0.0, (90 - days) / 45)
+    return float(50 + (combined - 50) * decay)

@@ -223,3 +223,131 @@ def derive_fundamentals(
         else np.nan
     )
     return result
+
+
+FLOW_KEYS = (
+    "revenue", "gross_profit", "operating_income", "net_income", "ebit", "ebitda",
+    "interest_expense", "tax_provision", "pretax_income", "operating_cash_flow",
+    "capital_expenditure",
+)
+# Level metrics taken from trailing-twelve-month statements when available.
+TTM_LEVEL_KEYS = (
+    "revenue", "gross_profit", "operating_income", "net_income", "ebit", "ebitda",
+    "interest_expense", "operating_cash_flow", "capital_expenditure", "cash",
+    "total_debt", "equity", "assets", "free_cash_flow", "gross_margin_pct",
+    "operating_margin_pct", "net_margin_pct", "fcf_margin_pct", "cash_conversion",
+    "net_debt", "debt_to_equity", "net_debt_to_ebitda", "interest_coverage",
+    "return_on_equity", "return_on_assets", "roic", "negative_equity_flag",
+    "negative_ebitda_flag", "negative_operating_profit_flag", "net_cash_flag",
+    "financial_diagnostics",
+)
+# Year-over-year metrics that need two full trailing-twelve-month windows.
+TTM_GROWTH_KEYS = (
+    "revenue_growth_yoy", "operating_margin_change_1y", "fcf_growth_yoy",
+    "earnings_growth_yoy",
+)
+
+
+def _consecutive_quarters(frame: Any, count: int) -> pd.DataFrame:
+    """Newest ``count`` quarterly columns, only if they are evenly spaced."""
+    working = _ordered_frame(frame)
+    if working.shape[1] < count:
+        return pd.DataFrame()
+    working = working.iloc[:, :count]
+    dates = pd.to_datetime(working.columns, errors="coerce", utc=True)
+    if dates.isna().any():
+        return pd.DataFrame()
+    gaps = np.asarray((dates[:-1] - dates[1:]).days)
+    if len(gaps) and not ((gaps >= 75) & (gaps <= 105)).all():
+        return pd.DataFrame()
+    return working
+
+
+def _ttm_frame(quarterly: Any, windows: int) -> pd.DataFrame:
+    """Sum flow rows over ``windows`` trailing-four-quarter blocks.
+
+    A block is produced only when every one of its four quarters is present, so
+    a missing quarter can never be silently skipped over.
+    """
+    quarters = _consecutive_quarters(quarterly, 4 * windows)
+    if quarters.empty:
+        return pd.DataFrame()
+    numeric = quarters.apply(pd.to_numeric, errors="coerce")
+    columns = {}
+    for block in range(windows):
+        part = numeric.iloc[:, block * 4:(block + 1) * 4]
+        columns[part.columns[0]] = part.sum(axis=1, min_count=4).where(
+            part.notna().all(axis=1)
+        )
+    return pd.DataFrame(columns)
+
+
+def _balance_frame(quarterly: Any, windows: int) -> pd.DataFrame:
+    """Quarter-end balances matching each trailing-twelve-month window."""
+    quarters = _consecutive_quarters(quarterly, 4 * (windows - 1) + 1)
+    if quarters.empty:
+        return pd.DataFrame()
+    return quarters.iloc[:, [block * 4 for block in range(windows)]]
+
+
+def derive_ttm_fundamentals(
+    income: Any, balance: Any, cashflow: Any, sector: Any = ""
+) -> dict[str, Any]:
+    """Trailing-twelve-month features from quarterly statements.
+
+    Two windows (eight quarters) also yield TTM-over-TTM growth; one window
+    yields only current levels.  An empty dict means no usable TTM data.
+    """
+    for windows in (2, 1):
+        ttm_income = _ttm_frame(income, windows)
+        ttm_cashflow = _ttm_frame(cashflow, windows)
+        quarter_balance = _balance_frame(balance, windows)
+        if ttm_income.empty:
+            continue
+        derived = derive_fundamentals(ttm_income, quarter_balance, ttm_cashflow, sector)
+        if pd.isna(number(derived.get("revenue"))):
+            continue
+        keys = TTM_LEVEL_KEYS + (TTM_GROWTH_KEYS if windows == 2 else ())
+        output = {key: derived.get(key, np.nan) for key in keys}
+        output["ttm_windows"] = windows
+        output["ttm_period_end"] = str(ttm_income.columns[0])
+        return output
+    return {}
+
+
+def latest_quarter_revenue_growth(income: Any) -> float:
+    """Latest quarter revenue versus the same quarter one year earlier."""
+    quarters = _consecutive_quarters(income, 5)
+    if quarters.empty:
+        return np.nan
+    lookup = {normalize_statement_label(label): label for label in quarters.index}
+    for name in ALIASES["revenue"]:
+        label = lookup.get(normalize_statement_label(name))
+        if label is not None:
+            values = pd.to_numeric(quarters.loc[label], errors="coerce")
+            if pd.notna(values.iloc[4]) and values.iloc[4] > 0:
+                return change_pct(values.iloc[0], values.iloc[4])
+    return np.nan
+
+
+def merge_fundamentals(
+    annual: dict[str, Any], ttm: dict[str, Any], quarter_growth: float = np.nan
+) -> dict[str, Any]:
+    """Prefer fresher trailing-twelve-month values over the last fiscal year."""
+    result = dict(annual)
+    replaced = [
+        key for key, value in ttm.items()
+        if key in TTM_LEVEL_KEYS + TTM_GROWTH_KEYS
+        and not (isinstance(value, float) and np.isnan(value))
+        and value is not None
+    ]
+    for key in replaced:
+        result[key] = ttm[key]
+    result["revenue_growth_latest_quarter_yoy"] = quarter_growth
+    result["fundamentals_basis"] = (
+        "TTM_WITH_TTM_GROWTH" if ttm.get("ttm_windows") == 2
+        else "TTM_LEVELS_ANNUAL_GROWTH" if ttm
+        else "ANNUAL"
+    )
+    result["ttm_period_end"] = ttm.get("ttm_period_end")
+    return result

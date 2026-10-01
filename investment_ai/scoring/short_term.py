@@ -1,28 +1,66 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from investment_ai.features.technical import event_timing_score, setup_scores
-from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted, safe_nanmean
+from investment_ai.features.benchmark import REBOUND_RISK
+from investment_ai.features.technical import (
+    event_timing_score,
+    model_rs,
+    setup_scores,
+)
+from investment_ai.scoring.common import (
+    INSUFFICIENT_DATA,
+    NEUTRAL,
+    curve,
+    safe_nanmean,
+    weighted,
+)
 
 NO_CREDIBLE_SETUP = "NO_CREDIBLE_SETUP"
 CREDIBLE_SETUPS = {"PULLBACK", "BREAKOUT", "MOMENTUM_CONTINUATION", "MIXED"}
+SHORT_TERM_WEIGHTS = {
+    "momentum": 0.20,
+    "setup": 0.20,
+    "expectations": 0.20,
+    "earnings_drift": 0.20,
+    "volume": 0.10,
+    "technical": 0.05,
+    "positioning": 0.05,
+}
 
 
-def score_short_term(row: dict) -> dict:
-    setup = setup_scores(row)
-    relative_strength, rs_coverage, _ = weighted(
+def momentum_pillar(row: dict) -> tuple[float, float]:
+    """Skip-month momentum led by the 12-1 month return.
+
+    In the 5-year walk-forward backtest (2021-2026, weekly) 12-1 and 6-1 month
+    momentum were the only price signals with a consistently positive IC; the
+    20-day reversal and 20-day strength terms were indistinguishable from zero.
+    The 60-day term keeps coverage for listings with under a year of history.
+    """
+    score, coverage, _ = weighted(
         {
-            "rs20": row.get("rs_20d_percentile"),
-            "rs60": row.get("rs_60d_percentile"),
-            "rs126": row.get("rs_126d_percentile"),
+            "mom_12_1": model_rs(row, "mom_12_1"),
+            "mom_6_1": model_rs(row, "mom_6_1"),
+            "rs60": model_rs(row, "60d"),
         },
-        {"rs20": 0.50, "rs60": 0.35, "rs126": 0.15},
-        0.60,
+        {"mom_12_1": 0.50, "mom_6_1": 0.30, "rs60": 0.20},
+        0.20,
     )
-    volume = curve(
-        row.get("relative_volume_1d"), [(0.3, 20), (1, 55), (1.8, 100), (4, 70)]
-    )
-    technical = safe_nanmean(
+    return score, coverage
+
+
+def volume_pillar(row: dict) -> float:
+    """Volume surprise signed by price direction (accumulation vs distribution)."""
+    relative, move = row.get("relative_volume_5d"), row.get("return_5d_pct")
+    if pd.isna(relative) or pd.isna(move):
+        relative, move = row.get("relative_volume_1d"), row.get("return_1d_pct")
+    if relative is None or move is None or pd.isna(relative) or pd.isna(move):
+        return np.nan
+    signed = (relative - 1) * np.sign(move)
+    return curve(signed, [(-1, 10), (-0.3, 35), (0, 50), (0.3, 65), (1, 85), (2.5, 70)])
+
+
+def technical_pillar(row: dict) -> float:
+    return safe_nanmean(
         [
             curve(
                 row.get("price_vs_ma20_pct"), [(-15, 0), (0, 60), (8, 100), (25, 40)]
@@ -32,32 +70,46 @@ def score_short_term(row: dict) -> dict:
             ),
         ]
     )
+
+
+def positioning_pillar(row: dict) -> float:
+    """Short-interest level and change; crowded or rising shorts are negative."""
+    level = curve(
+        row.get("short_interest_pct_float"),
+        [(0, 60), (2, 55), (5, 45), (10, 30), (20, 15)],
+    )
+    change = curve(
+        row.get("short_interest_change_pct"), [(-30, 80), (0, 50), (30, 20)]
+    )
+    return weighted({"level": level, "change": change}, {"level": 0.5, "change": 0.5})[0]
+
+
+def score_short_term(row: dict) -> dict:
+    setup = setup_scores(row)
+    relative_strength, rs_coverage = momentum_pillar(row)
+    volume = volume_pillar(row)
+    technical = technical_pillar(row)
     event = event_timing_score(
         row.get("days_to_next_earnings"), row.get("days_since_last_earnings")
     )
+    drift = row.get("earnings_drift_score", np.nan)
+    positioning = positioning_pillar(row)
     pillars = {
-        "relative_strength": relative_strength,
+        "momentum": relative_strength,
         "setup": setup["setup_quality_score"],
         "expectations": row.get("expectations_short_score"),
+        "earnings_drift": drift,
         "volume": volume,
         "technical": technical,
-        "event": event,
+        "positioning": positioning,
     }
-    score, coverage, status = weighted(
-        pillars,
-        {
-            "relative_strength": 0.20,
-            "setup": 0.25,
-            "expectations": 0.20,
-            "volume": 0.10,
-            "technical": 0.15,
-            "event": 0.10,
-        },
-        0.70,
-    )
+    weights = dict(SHORT_TERM_WEIGHTS)
+    if row.get("market_regime") == REBOUND_RISK:
+        # Momentum crashes cluster in sharp rebounds after market declines.
+        weights["momentum"] /= 2
+    score, coverage, status = weighted(pillars, weights, 0.60, neutral_fill=NEUTRAL)
     core_ok = (
         pd.notna(relative_strength)
-        and rs_coverage >= 0.60
         and pd.notna(setup["setup_quality_score"])
         and setup["setup_coverage"] >= 0.70
         and pd.notna(row.get("expectations_short_score"))
@@ -73,6 +125,8 @@ def score_short_term(row: dict) -> dict:
         "short_rs_coverage": rs_coverage,
         "volume_confirmation_score": volume,
         "technical_trend_score": technical,
+        "positioning_score": positioning,
+        # Event timing is a risk input only; it no longer contributes to alpha.
         "event_timing_score": event,
         "short_term_score": score,
         "short_term_coverage": coverage,

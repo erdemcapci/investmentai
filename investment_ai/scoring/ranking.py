@@ -9,10 +9,15 @@ def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         result["expectations_long_score"] = result.get("expectations_score")
     if "expectations_short_score" not in result:
         result["expectations_short_score"] = result.get("expectations_score")
+    # Ranks follow the risk-adjusted score when the action layer has run.
+    for horizon in ("long_term", "short_term"):
+        if f"{horizon}_risk_adjusted_score" not in result:
+            result[f"{horizon}_risk_adjusted_score"] = result[f"{horizon}_score"]
     lt = (
         result[result.long_term_score.notna()]
         .sort_values(
             [
+                "long_term_risk_adjusted_score",
                 "long_term_score",
                 "confidence_score",
                 "expectations_long_score",
@@ -31,6 +36,7 @@ def rank_results(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         ]
         .sort_values(
             [
+                "short_term_risk_adjusted_score",
                 "short_term_score",
                 "confidence_score",
                 "expectations_short_score",

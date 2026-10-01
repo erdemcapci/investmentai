@@ -151,8 +151,8 @@ def test_manifest_has_versions_coverage_and_config(tmp_path, monkeypatch):
     manifest = build_manifest(
         context, {"price_coverage_pct": 99, "universe_count": 2}, {"top_n": 10}
     )
-    assert manifest["application_version"] == "1.1.5"
-    assert manifest["scoring_model_version"] == "3.1.2"
+    assert manifest["application_version"] == "1.2.0"
+    assert manifest["scoring_model_version"] == "3.2.0"
     assert manifest["cache_schema_version"] == 4
     assert manifest["database_schema_version"] == 5
     assert manifest["output_schema_version"] == 1
@@ -275,7 +275,7 @@ def test_replay_uses_stored_inputs_without_yahoo(tmp_path, monkeypatch):
         json.dumps(
             {
                 "application_version": "1.0.2",
-                "scoring_model_version": "3.1.2",
+                "scoring_model_version": "3.2.0",
                 "scoring_code_fingerprint": app.scoring_code_fingerprint(),
                 "artifact_sha256": {
                     name: hashlib.sha256((source / name).read_bytes()).hexdigest()

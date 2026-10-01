@@ -275,7 +275,10 @@ def parse_surprises(value: Any) -> dict[str, Any]:
         return {}
     if values.abs().max() <= 2:
         values *= 100
+    last_date = pd.to_datetime(values.index[-1], utc=True, errors="coerce")
     return {
+        "last_eps_surprise_pct": values.iloc[-1],
+        "last_eps_surprise_date": str(last_date) if pd.notna(last_date) else None,
         "positive_surprise_rate_4q": (values > 0).mean() * 100,
         "median_eps_surprise_4q": values.median(),
         "mean_eps_surprise_4q": values.mean(),

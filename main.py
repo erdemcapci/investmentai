@@ -44,10 +44,16 @@ from investment_ai.data.symbol_resolver import SymbolResolver
 from investment_ai.data.price_store import PriceStore, price_quality
 from investment_ai.data.yahoo import YahooClient
 from investment_ai.health import constituent_source_health
-from investment_ai.features.benchmark import BENCHMARKS, attach_benchmark_prices
+from investment_ai.features.benchmark import (
+    BENCHMARKS,
+    assign_benchmark,
+    attach_benchmark_prices,
+)
+from investment_ai.features.technical import earnings_reaction
 from investment_ai.pipeline import build_analysis
 from investment_ai.reporting.export import export_run
 from investment_ai.reporting.tables import print_rankings
+from investment_ai.scoring.action import build_action_list
 from investment_ai.runtime import (
     RunContext,
     atomic_csv,
@@ -257,18 +263,53 @@ def methodology() -> pd.DataFrame:
         [
             {
                 "score": "Long term",
-                "formula": "25% Quality + 20% Growth + 20% Valuation + 20% Long-Term Expectations + 10% Long Trend + 5% Financial Safety",
+                "formula": "25% Quality + 20% Growth + 20% Valuation + 20% Long-Term Expectations + 10% Long Trend (6-1 and 12-1 month momentum) + 5% Financial Safety; quality and growth blend absolute curves with sector-region percentiles; missing non-core pillars count as neutral",
             },
             {
                 "score": "Short term",
-                "formula": "20% raw Relative Strength + 25% Setup + 20% Short-Term Expectations + 10% Volume + 15% Technical Trend + 10% Event Timing",
+                "formula": "20% Relative Strength (50% 12-1, 30% 6-1 month momentum, 20% 60d) + 20% Setup + 20% Short-Term Expectations + 20% Earnings Drift + 10% Signed Volume + 5% Technical Trend + 5% Short Interest; momentum weight halves in REBOUND_RISK regimes; missing non-core pillars count as neutral",
             },
             {
-                "score": "Benchmark RS",
-                "formula": "stock return - assigned regional benchmark return; experimental and retained beside raw RS",
+                "score": "Relative strength basis",
+                "formula": "RS_BASIS=raw (default) ranks raw returns within sector; RS_BASIS=benchmark ranks excess return over the assigned regional index (raw fallback per security)",
+            },
+            {
+                "score": "Ranking",
+                "formula": "Ranks sort by risk-adjusted score = score - 0.20 x max(risk - 50, 0), minus 5 short-term points when earnings are due within 2 days",
+            },
+            {
+                "score": "Action list",
+                "formula": "Credible short-term setups inside the top half of the long-term ranking, ordered by risk-adjusted short-term score, at most 3 per sector; stop = 1 sigma of a 10-session move, target = 1.5x stop distance, size risks 1% of the portfolio (halved outside RISK_ON)",
             },
         ]
     )
+
+
+def _earnings_reactions(
+    provider: pd.DataFrame, histories: pd.DataFrame | None, universe: pd.DataFrame
+) -> pd.DataFrame:
+    """Measure the announcement-window return for each last earnings date.
+
+    Stored in normalized_provider.csv so replay reproduces it without prices.
+    """
+    result = provider.copy()
+    if histories is None or result.empty or "symbol" not in result:
+        return result
+    index_names = dict(zip(universe.symbol, universe.get("index_name", "")))
+    benchmarks = {
+        symbol: symbol_history(histories, symbol).get("Close")
+        for symbol, _, _ in BENCHMARKS.values()
+    }
+    rows = []
+    for row in result.to_dict("records"):
+        event = row.get("last_earnings_date") or row.get("last_eps_surprise_date")
+        stock = symbol_history(histories, row["symbol"]).get("Close")
+        benchmark = benchmarks.get(assign_benchmark(index_names.get(row["symbol"], ""))[0])
+        rows.append(earnings_reaction(stock, benchmark, event))
+    reactions = pd.DataFrame(rows, index=result.index)
+    for column in reactions:
+        result[column] = reactions[column]
+    return result
 
 
 def _rank_changes(
@@ -337,6 +378,29 @@ def _parser() -> argparse.ArgumentParser:
     modes.add_argument("--replay", metavar="RUN_ID")
     modes.add_argument("--rescore", metavar="RUN_ID")
     modes.add_argument("--validation-report", action="store_true")
+    modes.add_argument(
+        "--backtest",
+        action="store_true",
+        help="walk-forward test of the price-based signals on stored history",
+    )
+    parser.add_argument(
+        "--backtest-years",
+        type=float,
+        default=None,
+        help="download this many years of prices instead of using the local store",
+    )
+    parser.add_argument(
+        "--backtest-step",
+        type=int,
+        default=5,
+        help="sessions between backtest rebalance dates (default 5)",
+    )
+    parser.add_argument(
+        "--backtest-cost-bps",
+        type=float,
+        default=10.0,
+        help="one-way trading cost in basis points (default 10)",
+    )
     return parser
 
 
@@ -708,7 +772,9 @@ def execute(
                             datetime.fromisoformat(row[f"{name}_fetched_at_utc"]),
                         )
                 enriched.append(row)
-            provider = pd.DataFrame(enriched)
+            provider = _earnings_reactions(
+                pd.DataFrame(enriched), downloaded, analysis_universe
+            )
             atomic_csv(provider, context.directory / "normalized_provider.csv")
 
         start = time.monotonic()
@@ -878,11 +944,17 @@ def execute(
                 "run_status": health,
                 "run_status_reasons": reasons,
                 **health_details,
-                "benchmark_rs_status": "AVAILABLE_EXPERIMENTAL"
+                "benchmark_rs_status": "AVAILABLE"
                 if full.get("benchmark_rs_status", pd.Series("", index=full.index))
-                .eq("AVAILABLE_EXPERIMENTAL")
+                .eq("AVAILABLE")
                 .any()
                 else "FALLBACK_RAW",
+                "rs_basis_counts": full.get(
+                    "rs_basis", pd.Series(dtype=object)
+                ).value_counts().to_dict(),
+                "market_regime_counts": full.get(
+                    "market_regime", pd.Series(dtype=object)
+                ).value_counts().to_dict(),
                 **{key: round(value, 3) for key, value in timings.items()},
             }
         )
@@ -899,7 +971,7 @@ def execute(
                 else False
             )
             metrics[f"benchmark_{benchmark_symbol}_status"] = (
-                "AVAILABLE_EXPERIMENTAL" if available else "UNAVAILABLE"
+                "AVAILABLE" if available else "UNAVAILABLE"
             )
             observed = (
                 full.loc[members]
@@ -1081,6 +1153,9 @@ def execute(
             if health_details["st_run_status"] != "INVALID"
             else short_term.iloc[0:0],
             TOP_N,
+            build_action_list(full)
+            if "INVALID" not in {health_details["lt_run_status"], health_details["st_run_status"]}
+            else None,
         )
         print(f"""\nApplication: {APPLICATION_VERSION}
 Scoring model: {SCORING_MODEL_VERSION}
@@ -1148,6 +1223,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(validation_report(store.db), indent=2, default=str))
         store.close()
         return 0
+    if args.backtest:
+        from investment_ai.backtest import run_backtest_cli
+
+        return run_backtest_cli(
+            years=args.backtest_years,
+            step=args.backtest_step,
+            cost_bps=args.backtest_cost_bps,
+        )
     return execute(
         args.replay or args.rescore or args.resume,
         resume=bool(args.resume),

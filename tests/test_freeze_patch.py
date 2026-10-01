@@ -145,8 +145,8 @@ def test_prediction_v5_metadata_round_trip_and_minimal_row(tmp_path):
                 "benchmark_name": "STOXX 600", "benchmark_return_basis": "ADJUSTED_CLOSE_RETURN",
                 "benchmark_currency": "EUR", "benchmark_assignment_method": "REGIONAL_INDEX",
                 "trading_currency": "EUR", "financial_statement_currency": "EUR", "market_cap_currency": "EUR"}
-    store.save_predictions("r1", "2026-01-01T00:00:00+00:00", "3.1.2", [metadata])
-    store.save_predictions("r2", "2026-01-02T00:00:00+00:00", "3.1.2", [{"symbol": "OLD"}])
+    store.save_predictions("r1", "2026-01-01T00:00:00+00:00", "3.2.0", [metadata])
+    store.save_predictions("r2", "2026-01-02T00:00:00+00:00", "3.2.0", [{"symbol": "OLD"}])
     row = dict(store.db.execute("SELECT * FROM prediction_snapshots WHERE run_id='r1'").fetchone())
     for key, value in metadata.items():
         assert row[key] == value

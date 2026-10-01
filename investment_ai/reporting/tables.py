@@ -10,6 +10,7 @@ LT_COLUMNS = [
     "index_name",
     "sector",
     "long_term_score",
+    "long_term_risk_adjusted_score",
     "quality_score",
     "growth_score",
     "valuation_score",
@@ -17,6 +18,7 @@ LT_COLUMNS = [
     "long_trend_score",
     "risk_score",
     "risk_coverage",
+    "fundamentals_basis",
     "expectations_direction",
     "overall_data_status",
     "confidence_score",
@@ -37,23 +39,58 @@ ST_COLUMNS = [
     "company_name",
     "index_name",
     "short_term_score",
+    "short_term_risk_adjusted_score",
     "short_term_setup",
     "long_term_score",
     "short_rs_score",
     "setup_quality_score",
     "expectations_short_score",
+    "earnings_drift_score",
     "expectations_direction",
     "volume_confirmation_score",
     "technical_trend_score",
+    "positioning_score",
     "event_timing_score",
     "risk_score",
     "risk_coverage",
+    "market_regime",
+    "rs_basis",
     "overall_data_status",
     "confidence_score",
+    "current_price",
+    "stop_loss_price",
+    "target_price",
+    "suggested_position_pct",
     "return_1d_pct",
     "return_5d_pct",
     "return_20d_pct",
     "drawdown_from_20d_high_pct",
+    "days_to_next_earnings",
+    "earnings_imminent_flag",
+    "st_top_positive_driver",
+    "st_top_negative_driver",
+]
+ACTION_COLUMNS = [
+    "action_rank",
+    "symbol",
+    "company_name",
+    "sector",
+    "index_name",
+    "short_term_setup",
+    "short_term_rank",
+    "long_term_rank",
+    "short_term_risk_adjusted_score",
+    "long_term_score",
+    "current_price",
+    "stop_loss_price",
+    "stop_loss_pct",
+    "target_price",
+    "portfolio_weight_pct",
+    "suggested_position_pct",
+    "holding_period_sessions",
+    "market_regime",
+    "risk_score",
+    "earnings_imminent_flag",
     "days_to_next_earnings",
     "st_top_positive_driver",
     "st_top_negative_driver",
@@ -74,9 +111,15 @@ INVESTMENT_RANKING_COLUMNS = [
     "short_term_score",
     "short_term_score_change_7d",
     "short_term_setup",
-    # Risk and confidence.
+    "long_term_risk_adjusted_score",
+    "short_term_risk_adjusted_score",
+    # Risk, confidence and the short-term trade plan.
     "risk_score",
     "confidence_score",
+    "market_regime",
+    "stop_loss_price",
+    "target_price",
+    "suggested_position_pct",
     # Existing analyst point-in-time history.
     "target_mean",
     "target_mean_change_7d_pct",
@@ -106,8 +149,10 @@ INVESTMENT_RANKING_COLUMNS = [
     "short_rs_score",
     "setup_quality_score",
     "expectations_short_score",
+    "earnings_drift_score",
     "volume_confirmation_score",
     "technical_trend_score",
+    "positioning_score",
     "event_timing_score",
     # Current market context.
     "current_price",
@@ -139,8 +184,13 @@ def _show(frame, columns, top):
     )
 
 
-def print_rankings(lt: pd.DataFrame, st: pd.DataFrame, top: int):
+def print_rankings(
+    lt: pd.DataFrame, st: pd.DataFrame, top: int, action: pd.DataFrame | None = None
+):
     print("\nLONG-TERM INVESTMENT RANKING\n")
     print(_show(lt, LT_COLUMNS, top))
     print("\nSHORT-TERM OPPORTUNITY RANKING\n")
     print(_show(st, ST_COLUMNS, top))
+    if action is not None and len(action):
+        print("\nACTION LIST (short-term timing inside the long-term top half)\n")
+        print(_show(action, ACTION_COLUMNS, len(action)))

@@ -169,7 +169,7 @@ def test_missing_endpoint_data_does_not_invalidate_valid_equity_mapping():
 
 def test_stoxx_mapping_health_gate_and_scoring_version_are_unchanged():
     assert MAPPING_INVALID_PCT == 90
-    assert SCORING_MODEL_VERSION == "3.1.2"
+    assert SCORING_MODEL_VERSION == "3.2.0"
 
 
 def test_provider_identity_mismatch_and_verified_persistence():
@@ -300,7 +300,7 @@ def test_low_coverage_cohort_is_excluded_but_diagnostic_remains():
 def test_maturity_coverage_uses_only_matured_predictions(tmp_path):
     store = HistoryStore(tmp_path / "history.db")
     rows = [{"symbol": f"S{i}", "short_term_score": 50, "short_term_rank": i + 1} for i in range(100)]
-    store.save_predictions("r", "2025-01-01T00:00:00+00:00", "3.1.2", rows)
+    store.save_predictions("r", "2025-01-01T00:00:00+00:00", "3.2.0", rows)
     with store.db:
         for i in range(55):
             store.db.execute("UPDATE prediction_outcomes SET forward_5d_return=1 WHERE run_id='r' AND symbol=?", (f"S{i}",))

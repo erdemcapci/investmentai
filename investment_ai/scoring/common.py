@@ -44,9 +44,23 @@ def curve(value: Any, points: list[tuple[float, float]]) -> float:
     return float(np.clip(np.interp(x, [a for a, _ in p], [b for _, b in p]), 0, 100))
 
 
+NEUTRAL = 50.0
+
+
 def weighted(
-    components: dict[str, Any], weights: dict[str, float], minimum: float = 0
+    components: dict[str, Any],
+    weights: dict[str, float],
+    minimum: float = 0,
+    neutral_fill: float | None = None,
 ) -> tuple[float, float, str]:
+    """Weighted mean of available components.
+
+    By default missing components are dropped and the remaining weights are
+    renormalised.  With ``neutral_fill`` a missing component instead counts as
+    that value, so absent evidence shrinks the score toward neutral rather than
+    letting the available components speak for the missing weight.  Coverage
+    always reflects only the genuinely available weight.
+    """
     total = sum(weights.values())
     available = [
         (number(components.get(k)), w)
@@ -56,9 +70,12 @@ def weighted(
     coverage = sum(w for _, w in available) / total if total else 0
     if not available or coverage < minimum:
         return np.nan, coverage, INSUFFICIENT_DATA
-    score = np.clip(
-        sum(v * w for v, w in available) / sum(w for _, w in available), 0, 100
-    )
+    if neutral_fill is not None:
+        filled = available + [(neutral_fill, total * (1 - coverage))]
+        score = sum(v * w for v, w in filled) / total
+    else:
+        score = sum(v * w for v, w in available) / sum(w for _, w in available)
+    score = np.clip(score, 0, 100)
     return float(score), float(coverage), RANKED if coverage == 1 else PARTIAL_DATA
 
 
