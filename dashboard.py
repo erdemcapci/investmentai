@@ -33,7 +33,8 @@ STATUS = {"VALID": ("good", "✅"), "DEGRADED": ("warning", "⚠️"), "INVALID"
 st.set_page_config(page_title="Investment AI", page_icon="📈", layout="wide")
 
 
-@st.cache_data(show_spinner=False)
+# Short TTLs so a run finished while the app is open appears without a restart.
+@st.cache_data(show_spinner=False, ttl=60)
 def _runs() -> list[dict]:
     return [
         {"run_id": run["run_id"], "path": str(run["path"]), "manifest": run["manifest"]}
@@ -48,12 +49,12 @@ def _load(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return load_run(Path(path))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def _prices(symbol: str) -> pd.DataFrame:
     return price_history(HISTORY_DB, symbol)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def _backtest() -> dict:
     return latest_backtest(BACKTEST_DIR)
 
@@ -114,6 +115,9 @@ if not runs:
 
 with st.sidebar:
     st.title("📈 Investment AI")
+    if st.button("Check for new runs", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
     labels = {
         run["run_id"]: f"{run['run_id'][:8]} {run['run_id'][9:13]}Z · "
         f"{run['manifest'].get('overall_run_status', '?')} · "
@@ -121,6 +125,8 @@ with st.sidebar:
         for run in runs
     }
     run_id = st.selectbox("Run", list(labels), format_func=labels.get)
+    if run_id != runs[0]["run_id"]:
+        st.caption("You are viewing an older run; the newest is first in the list.")
     run = next(item for item in runs if item["run_id"] == run_id)
     manifest = run["manifest"]
     full, action = _load(run["path"])
