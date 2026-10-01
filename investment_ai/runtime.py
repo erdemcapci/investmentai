@@ -48,6 +48,8 @@ SCORING_CODE_PATHS = (
     "investment_ai/scoring/long_term.py",
     "investment_ai/scoring/short_term.py",
     "investment_ai/scoring/ranking.py",
+    "investment_ai/scoring/action.py",
+    "investment_ai/features/benchmark.py",
     "investment_ai/features/analyst.py",
     "investment_ai/features/fundamentals.py",
     "investment_ai/features/valuation.py",
@@ -96,6 +98,8 @@ analysis_code_fingerprint = scoring_code_fingerprint
 
 def scoring_parameter_snapshot() -> dict[str, Any]:
     """Normalized runtime parameters that can alter scores or ranks."""
+    from investment_ai import config
+    from investment_ai.features.technical import BREAKOUT_THRESHOLD, PULLBACK_THRESHOLD
     from investment_ai.pipeline import LT_DRIVER_SPECS, ST_DRIVER_SPECS
 
     return {
@@ -103,7 +107,18 @@ def scoring_parameter_snapshot() -> dict[str, Any]:
         "lt_weights": {item[2]: item[3] for item in LT_DRIVER_SPECS},
         "st_weights": {item[2]: item[3] for item in ST_DRIVER_SPECS},
         "peer_fallback_order": ["sector", "best_qualifying_own_index", "full_universe"],
-        "setup_thresholds": {"credible_setup_required": True},
+        "rs_basis": config.RS_BASIS,
+        "risk_penalty_per_point": config.RISK_PENALTY_PER_POINT,
+        "earnings_imminent": [
+            config.EARNINGS_IMMINENT_DAYS, config.EARNINGS_IMMINENT_PENALTY
+        ],
+        "trade_plan": [config.TRADE_RISK_BUDGET_PCT, config.MAX_POSITION_PCT],
+        "action_list": [config.ACTION_LIST_SIZE, config.ACTION_MAX_PER_SECTOR],
+        "setup_thresholds": {
+            "credible_setup_required": True,
+            "pullback": PULLBACK_THRESHOLD,
+            "breakout": BREAKOUT_THRESHOLD,
+        },
         "coverage_thresholds": {
             "common_price": [PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT],
             "lt_component": [70, 55],

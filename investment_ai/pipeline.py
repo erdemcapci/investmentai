@@ -14,14 +14,25 @@ from investment_ai.status import (
     STALE,
     STALE_FALLBACK,
 )
-from investment_ai.features.technical import add_relative_strength
-from investment_ai.features.benchmark import add_benchmark_relative_strength
+from investment_ai.config import MIN_PEERS, RS_BASIS
+from investment_ai.features.technical import (
+    add_model_relative_strength,
+    add_relative_strength,
+    earnings_drift_score,
+)
+from investment_ai.features.benchmark import (
+    add_benchmark_relative_strength,
+    assign_benchmark,
+    market_regime,
+)
+from investment_ai.features.peers import fallback_percentile
 from investment_ai.features.valuation import add_peer_percentiles
 from investment_ai.features.fundamentals import is_financial
-from investment_ai.scoring.common import curve, weighted
-from investment_ai.scoring.long_term import score_long_term
+from investment_ai.scoring.action import risk_adjusted_scores, trade_plan
+from investment_ai.scoring.common import curve, safe_nanmean, weighted
+from investment_ai.scoring.long_term import RELATIVE_METRICS, score_long_term
 from investment_ai.scoring.ranking import rank_results
-from investment_ai.scoring.short_term import score_short_term
+from investment_ai.scoring.short_term import SHORT_TERM_WEIGHTS, score_short_term
 
 SECTOR_MAP = {
     "technology": "Technology",
@@ -174,6 +185,82 @@ def _history_scores(row):
     return target, long_revenue
 
 
+def _column(frame: pd.DataFrame, name: str) -> pd.Series:
+    return pd.to_numeric(
+        frame.get(name, pd.Series(np.nan, index=frame.index)), errors="coerce"
+    )
+
+
+def add_sector_region_percentiles(frame: pd.DataFrame) -> pd.DataFrame:
+    """Rank fundamentals within sector and region, falling back to sector."""
+    result = frame.copy()
+    result["capital_returns_pct"] = [
+        safe_nanmean([roe, roic])
+        for roe, roic in zip(_column(result, "return_on_equity"), _column(result, "roic"))
+    ]
+    region = result.get("index_name", pd.Series("", index=result.index)).map(
+        lambda value: assign_benchmark(value)[0]
+    )
+    sector = result.get("sector", pd.Series("", index=result.index)).fillna("").astype(str)
+    levels = [sector + "|" + region.astype(str), sector]
+    for metric in RELATIVE_METRICS:
+        result[f"{metric}_sector_pct"] = fallback_percentile(
+            _column(result, metric), levels, MIN_PEERS
+        )
+    return result
+
+
+def add_positioning_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Short interest as a percent of float and its month-over-month change."""
+    result = frame.copy()
+    short_float = _column(result, "provider_info_shortPercentOfFloat")
+    # Yahoo reports a fraction; values above 1 are already percentages.
+    result["short_interest_pct_float"] = np.where(
+        short_float.le(1), short_float * 100, short_float
+    )
+    current = _column(result, "provider_info_sharesShort")
+    prior = _column(result, "provider_info_sharesShortPriorMonth")
+    result["short_interest_change_pct"] = np.where(
+        prior.gt(0), (current / prior - 1) * 100, np.nan
+    )
+    return result
+
+
+def add_earnings_drift(frame: pd.DataFrame) -> pd.DataFrame:
+    """Post-earnings drift inputs measured against the last completed close."""
+    result = frame.copy()
+    as_of = pd.to_datetime(
+        result.get("price_as_of", pd.Series(pd.NaT, index=result.index)),
+        utc=True, errors="coerce",
+    )
+    event = pd.to_datetime(
+        result.get("last_earnings_date", pd.Series(pd.NaT, index=result.index)),
+        utc=True, errors="coerce",
+    )
+    history_date = pd.to_datetime(
+        result.get("last_eps_surprise_date", pd.Series(pd.NaT, index=result.index)),
+        utc=True, errors="coerce",
+    )
+    event = event.fillna(history_date)
+    surprise = _column(result, "last_earnings_surprise_pct")
+    # The earnings-history surprise is used only when it describes the same report.
+    same_report = (event - history_date).abs().le(pd.Timedelta(days=7))
+    surprise = surprise.where(
+        surprise.notna(), _column(result, "last_eps_surprise_pct").where(same_report)
+    )
+    result["earnings_event_date"] = event.astype(str).where(event.notna())
+    result["earnings_surprise_pct"] = surprise
+    result["days_since_earnings_asof"] = (as_of - event).dt.total_seconds() / 86400
+    reaction = _column(result, "earnings_reaction_excess_pct").combine_first(
+        _column(result, "earnings_reaction_pct")
+    )
+    result["earnings_drift_score"] = [
+        earnings_drift_score(s, r, d)
+        for s, r, d in zip(surprise, reaction, result["days_since_earnings_asof"])
+    ]
+    return result
+
+
 LT_DRIVER_SPECS = (
     ("Business quality", "Quality", "quality_score", 0.25),
     ("Growth", "Growth", "growth_score", 0.20),
@@ -183,12 +270,10 @@ LT_DRIVER_SPECS = (
     ("Financial safety", "Financial Safety", "financial_safety_score", 0.05),
 )
 ST_DRIVER_SPECS = (
-    ("Relative strength", "Relative Strength", "short_rs_score", 0.20),
-    ("Setup quality", "Setup Quality", "setup_quality_score", 0.25),
-    ("Short expectations", "Short Expectations", "expectations_short_score", 0.20),
-    ("Volume", "Volume", "volume_confirmation_score", 0.10),
-    ("Technical trend", "Technical Trend", "technical_trend_score", 0.15),
-    ("Event timing", "Event Timing", "event_timing_score", 0.10),
+    ("Relative strength", "Relative Strength", "short_rs_score", SHORT_TERM_WEIGHTS["momentum"]),
+    ("Short expectations", "Short Expectations", "expectations_short_score", SHORT_TERM_WEIGHTS["expectations"]),
+    ("Earnings drift", "Earnings Drift", "earnings_drift_score", SHORT_TERM_WEIGHTS["earnings_drift"]),
+    ("Short interest", "Positioning", "positioning_score", SHORT_TERM_WEIGHTS["positioning"]),
 )
 
 
@@ -310,8 +395,19 @@ def build_analysis(
             "price_book": False,
         },
     )
+    frame = add_sector_region_percentiles(frame)
+    frame = add_positioning_features(frame)
+    frame = add_earnings_drift(frame)
     frame = add_relative_strength(frame)
     frame = add_benchmark_relative_strength(frame)
+    frame = add_model_relative_strength(frame, RS_BASIS)
+    frame["market_regime"] = [
+        market_regime(ma, ret)
+        for ma, ret in zip(
+            _column(frame, "benchmark_price_vs_ma200_pct"),
+            _column(frame, "benchmark_return_20d_pct"),
+        )
+    ]
     frame = pd.concat(
         [
             frame.reset_index(drop=True),
@@ -342,6 +438,13 @@ def build_analysis(
     )
     for column in risk_results:
         frame[column] = risk_results[column]
+    records = frame.to_dict("records")
+    action = pd.DataFrame(
+        [{**risk_adjusted_scores(row), **trade_plan(row)} for row in records],
+        index=frame.index,
+    )
+    for column in action:
+        frame[column] = action[column]
     long_term, short_term = rank_results(frame)
     frame["long_term_rank"] = frame.symbol.map(
         long_term.set_index("symbol").long_term_rank

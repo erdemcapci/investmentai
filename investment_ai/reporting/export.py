@@ -2,11 +2,13 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 from investment_ai.reporting.tables import (
+    ACTION_COLUMNS,
     INVESTMENT_RANKING_COLUMNS,
     LT_COLUMNS,
     ST_COLUMNS,
 )
 from investment_ai.runtime import atomic_csv, atomic_json
+from investment_ai.scoring.action import build_action_list
 
 
 def write_validation_snapshot(path: Path, report: dict) -> None:
@@ -122,6 +124,16 @@ def export_run(
     stale_investment = investment_normal if both_invalid else investment_diagnostic
     if stale_investment.exists():
         stale_investment.unlink()
+    action = build_action_list(full)
+    action = action[[c for c in ACTION_COLUMNS if c in action]].copy()
+    action.insert(0, "run_status", run_status)
+    action_invalid = lt_status == "INVALID" or st_status == "INVALID"
+    action_normal = directory / "action_list.csv"
+    action_diagnostic = directory / "action_list_invalid_diagnostic.csv"
+    atomic_csv(action, action_diagnostic if action_invalid else action_normal)
+    stale_action = action_normal if action_invalid else action_diagnostic
+    if stale_action.exists():
+        stale_action.unlink()
     atomic_csv(insufficient, directory / "insufficient_data.csv")
     atomic_csv(pd.DataFrame([metadata]), directory / "run_metadata.csv")
     (directory / "methodology.md").write_text(

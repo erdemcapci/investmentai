@@ -16,7 +16,3 @@ ERROR = "ERROR"
 INSUFFICIENT = "INSUFFICIENT"
 FRESH = "FRESH"
 STALE = "STALE"
-
-
-def is_fresh(status: object) -> bool:
-    return status in {FRESH_PROVIDER, FRESH_CACHE, FRESH}

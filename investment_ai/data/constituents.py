@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -68,25 +67,12 @@ YAHOO_SUFFIX_BY_COUNTRY = {
     "uk": ".L",
 }
 
-RATE_LIMIT_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
-
-
-@dataclass
-class ApiResult:
-    value: Any
-    error: str | None = None
-
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def utc_now_iso() -> str:
     return utc_now().isoformat(timespec="seconds")
-
-
-def ensure_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
 
 
 def is_missing(value: Any) -> bool:
@@ -108,44 +94,14 @@ def safe_float(value: Any) -> float:
         return np.nan
 
 
-def safe_int(value: Any) -> int | float:
-    number = safe_float(value)
-    return int(number) if not np.isnan(number) else np.nan
-
-
-def first_present(
-    mapping: dict[str, Any] | None, keys: Iterable[str], default: Any = np.nan
-) -> Any:
-    if not isinstance(mapping, dict):
-        return default
-    for key in keys:
-        value = mapping.get(key)
-        if not is_missing(value):
-            return value
-    return default
-
-
 def normalize_symbol_for_yahoo(symbol: str) -> str:
     """Yahoo uses '-' for class shares that S&P/Wikipedia writes with '.'."""
     return str(symbol).strip().upper().replace(".", "-")
 
 
-def truncate_text(value: Any, max_length: int = 500) -> str:
-    text = "" if value is None else str(value)
-    return text if len(text) <= max_length else text[: max_length - 3] + "..."
-
-
 def clean_column_name(value: Any) -> str:
     text = str(value).strip().lower()
     return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-
-
-def safe_divide(numerator: Any, denominator: Any) -> float:
-    n = safe_float(numerator)
-    d = safe_float(denominator)
-    if np.isnan(n) or np.isnan(d) or d == 0:
-        return np.nan
-    return n / d
 
 
 def make_unique_columns(columns: Iterable[Any]) -> list[str]:
@@ -264,20 +220,6 @@ def fetch_sp500_constituents(cache_path: Path) -> pd.DataFrame:
         raise RuntimeError(
             "S&P 500 list could not be downloaded and no cached list exists."
         ) from exc
-
-
-def yahoo_symbol_for_europe(local_ticker: Any, country: Any) -> str:
-    """Translate the STOXX table's local ticker to Yahoo's exchange symbol."""
-    ticker = str(local_ticker).strip().upper().replace(" ", "-")
-    if not ticker or ticker == "NAN":
-        raise ValueError("Missing STOXX ticker")
-    suffix = YAHOO_SUFFIX_BY_COUNTRY.get(str(country).strip().lower())
-    if not suffix:
-        raise ValueError(f"Unsupported STOXX listing country: {country}")
-    # Preserve an already vendor-qualified ticker supplied by a future table.
-    if ticker.endswith(suffix):
-        return ticker
-    return ticker.replace(".", "-") + suffix
 
 
 def _find_stoxx_table(tables: list[pd.DataFrame]) -> pd.DataFrame:

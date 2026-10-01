@@ -47,3 +47,39 @@ def resolve_metric_peers(
         return peers, "index", selected
 
     return numeric.dropna().index, "universe", ""
+
+
+def fallback_percentile(
+    values: pd.Series,
+    levels: list[pd.Series],
+    minimum_peers: int,
+    higher_is_better: bool = True,
+) -> pd.Series:
+    """Vectorised peer percentile with hierarchical group fallback.
+
+    Each security is ranked inside the first grouping level whose group holds
+    at least ``minimum_peers`` valid observations; anything left over is
+    ranked against the full universe.  Missing values stay missing.
+    """
+    from investment_ai.scoring.common import percentile
+
+    numeric = pd.to_numeric(values, errors="coerce")
+    result = pd.Series(float("nan"), index=numeric.index, dtype=float)
+    assigned = pd.Series(False, index=numeric.index)
+    valid = numeric.notna()
+    for level in levels:
+        keys = level.reindex(numeric.index).fillna("").astype(str)
+        counts = valid.groupby(keys).transform("sum")
+        eligible = ~assigned & valid & counts.ge(minimum_peers)
+        if not eligible.any():
+            continue
+        ranks = numeric.groupby(keys, group_keys=False).apply(
+            lambda group: percentile(group, higher_is_better)
+        )
+        result.loc[eligible] = ranks.reindex(numeric.index).loc[eligible]
+        assigned |= eligible
+    remaining = ~assigned & valid
+    if remaining.any():
+        universe = percentile(numeric, higher_is_better)
+        result.loc[remaining] = universe.loc[remaining]
+    return result

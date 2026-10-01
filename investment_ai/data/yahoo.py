@@ -29,7 +29,12 @@ from investment_ai.features.analyst import (
     parse_surprises,
     parse_targets,
 )
-from investment_ai.features.fundamentals import derive_fundamentals
+from investment_ai.features.fundamentals import (
+    derive_fundamentals,
+    derive_ttm_fundamentals,
+    latest_quarter_revenue_growth,
+    merge_fundamentals,
+)
 from investment_ai.features.valuation import parse_valuation
 
 RATE_MARKERS = ("rate limit", "too many requests", "429", "yfratelimit")
@@ -114,6 +119,7 @@ class YahooClient:
         "symbol", "longName", "shortName", "country", "exchange",
         "fullExchangeName", "quoteType", "sector", "currentPrice",
         "regularMarketPrice", "currency", "financialCurrency",
+        "sharesShort", "sharesShortPriorMonth", "shortPercentOfFloat",
     }
     ANALYST_COMPONENTS = {
         "targets": ("get_analyst_price_targets", parse_targets),
@@ -188,9 +194,25 @@ class YahooClient:
         if not isinstance(dates, pd.DataFrame) or dates.empty:
             return {}
         now = pd.Timestamp.now(tz="UTC")
-        index = pd.to_datetime(dates.index, utc=True, errors="coerce").dropna()
+        dates = dates.copy()
+        dates.index = pd.to_datetime(dates.index, utc=True, errors="coerce")
+        dates = dates[dates.index.notna()]
+        index = dates.index
         future, past = index[index >= now], index[index < now]
+        surprise_column = next(
+            (
+                column for column in dates
+                if str(column).replace(" ", "").lower() in {"surprise(%)", "surprise%"}
+            ),
+            None,
+        )
+        last_surprise = np.nan
+        if len(past) and surprise_column is not None:
+            observed = pd.to_numeric(dates.loc[[past.max()], surprise_column], errors="coerce")
+            last_surprise = float(observed.iloc[0]) if observed.notna().any() else np.nan
         return {
+            "last_earnings_date": str(past.max()) if len(past) else None,
+            "last_earnings_surprise_pct": last_surprise,
             "next_earnings_date": str(future.min()) if len(future) else None,
             "days_to_next_earnings": (
                 (future.min() - now).total_seconds() / 86400 if len(future) else np.nan
@@ -316,7 +338,8 @@ class YahooClient:
             # financial/non-financial applicability decisions.
             lambda: self._fundamentals(ticker, info_data.get("sector") or sector),
             FORCE_REFRESH,
-            _meaningful,
+            # Pre-3.2 entries lack the basis marker and are refreshed once.
+            lambda data: _meaningful(data) and "fundamentals_basis" in data,
         )
         result.update(valuation.get("data", {}))
         result.update(fundamentals.get("data", {}))
@@ -350,11 +373,23 @@ class YahooClient:
 
     @staticmethod
     def _fundamentals(ticker: Any, sector: str) -> dict[str, Any]:
-        # Annual statements only: quarterly calls were previously discarded.
         income = call_with_retry(lambda: ticker.get_income_stmt(freq="yearly"))
         balance = call_with_retry(lambda: ticker.get_balance_sheet(freq="yearly"))
         cashflow = call_with_retry(lambda: ticker.get_cash_flow(freq="yearly"))
-        return derive_fundamentals(income, balance, cashflow, sector)
+        annual = derive_fundamentals(income, balance, cashflow, sector)
+        # Quarterly statements are optional: annual features remain usable when
+        # a provider has no quarterly history for the listing.
+        try:
+            q_income = call_with_retry(lambda: ticker.get_income_stmt(freq="quarterly"))
+            q_balance = call_with_retry(lambda: ticker.get_balance_sheet(freq="quarterly"))
+            q_cashflow = call_with_retry(lambda: ticker.get_cash_flow(freq="quarterly"))
+        except Exception:
+            return merge_fundamentals(annual, {})
+        return merge_fundamentals(
+            annual,
+            derive_ttm_fundamentals(q_income, q_balance, q_cashflow, sector),
+            latest_quarter_revenue_growth(q_income),
+        )
 
     def fetch_many(self, universe: pd.DataFrame) -> pd.DataFrame:
         rows = []

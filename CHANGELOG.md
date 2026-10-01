@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.3.0 (scoring model 3.3.0)
+
+- Reweighted the short-term model on 5-year backtest evidence: Relative
+  Strength 65%, Short-Term Expectations 20%, Earnings Drift 10%, Short
+  Interest 5%. Setup, volume and technical scores remain as zero-weight labels.
+- The credible-setup requirement no longer gates short-term ranking; the setup
+  stays in `short_term_setup` as a label.
+- The trade-plan stop widened from one to two ten-session standard deviations
+  (3–25%); the target remains 1.5 times the stop distance.
+- The action list takes short-term ranked names instead of credible setups only.
+- Backtest strategies now include the production price model and the 3.2.0
+  composite for comparison.
+- The 7-day score and rank changes compare only runs scored by the current
+  model, so a model upgrade never appears as a rank jump.
+- Removed unused helpers (legacy constituent utilities, `is_fresh`,
+  `pending_prediction_symbols`, unused constants).
+
+## 1.2.0 (scoring model 3.2.0)
+
+- Short term: removed the double-counted one-day return from the pullback score;
+  relative strength is now 50% 12-1, 30% 6-1 and 20% 60-day momentum (the
+  20-day term had no edge in the 5-year backtest); pullbacks require an uptrend and setup thresholds rose from 55 to 65.
+- Added an Earnings Drift pillar (last surprise, two-session announcement reaction
+  versus the benchmark, 45–90 day decay) and a Short Interest pillar. Volume is now
+  signed by price direction. Event timing moved from alpha to risk only.
+- Long term: skip-month (6-1, 12-1) momentum in Long Trend; quality and growth
+  inputs blend in sector-and-region percentiles; trailing-twelve-month
+  fundamentals from quarterly statements with a latest-quarter growth input.
+- Missing non-core pillars count as neutral instead of re-weighting the rest.
+- `RS_BASIS` switch (raw default, or benchmark-excess relative strength); benchmark
+  relative strength now also covers the momentum measures, and runs faster.
+- Market regime per region (`RISK_ON`, `RISK_OFF`, `REBOUND_RISK`).
+- Ranks follow a risk-adjusted score; new trade plan columns, and a
+  sector-capped `action_list.csv` that applies the long-term filter to short-term
+  timing.
+- New `python main.py --backtest` walk-forward harness for the price signals.
+- The fundamentals cache refreshes once to capture quarterly statements.
+- Tests no longer write run folders, caches or history into the working tree.
+- Backtest: `--backtest-earnings` replays the Earnings Drift pillar from Yahoo
+  report history; strategy simulation compares gated and ungated short-term
+  lists with 10-session holds and trade-plan stop/target exits.
+- `scripts/install_daily_run.sh` schedules a weekday launchd run for live
+  validation.
+
 ## 1.1.5
 
 - Added `investment_ranking.csv` with Long-Term and Short-Term rankings side-by-side.

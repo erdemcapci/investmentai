@@ -1,22 +1,69 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from investment_ai.scoring.common import INSUFFICIENT_DATA, curve, weighted, safe_nanmean
+from investment_ai.features.technical import model_rs
+from investment_ai.scoring.common import (
+    INSUFFICIENT_DATA,
+    NEUTRAL,
+    curve,
+    weighted,
+    safe_nanmean,
+)
+
+# Metrics also ranked within sector and region; the peer percentile is blended
+# 50/50 with the absolute curve so that sector norms (software margins versus
+# retail margins, US versus European growth) do not dominate the ranking.
+RELATIVE_METRICS = (
+    "fcf_margin_pct",
+    "operating_margin_pct",
+    "capital_returns_pct",
+    "return_on_equity",
+    "return_on_assets",
+    "net_margin_pct",
+    "revenue_growth_yoy",
+    "forward_revenue_growth",
+    "forward_eps_growth",
+)
+
+
+def _relative(row: dict, absolute: float, metric: str) -> float:
+    """Blend an absolute curve score with the sector-region peer percentile."""
+    return safe_nanmean([absolute, row.get(f"{metric}_sector_pct", np.nan)])
+
+
+def _trend_rs(row: dict, primary: str, fallback: str) -> float:
+    value = model_rs(row, primary)
+    return model_rs(row, fallback) if pd.isna(value) else value
+
+
+def long_trend_pillar(row: dict) -> tuple[float, float]:
+    """Skip-month momentum (6-1 and 12-1) plus distance from the 200-day average."""
+    trend = {
+        "rs126": _trend_rs(row, "mom_6_1", "126d"),
+        "rs252": _trend_rs(row, "mom_12_1", "252d"),
+        "ma200": curve(
+            row.get("price_vs_ma200_pct"), [(-30, 0), (0, 55), (20, 100), (50, 60)]
+        ),
+    }
+    score, coverage, _ = weighted(
+        trend, {"rs126": 0.35, "rs252": 0.35, "ma200": 0.30}, 0.60
+    )
+    return score, coverage
 
 
 def score_long_term(row: dict) -> dict:
     financial = bool(row.get("is_financial", False))
     if financial:
         quality = {
-            "roe": curve(
+            "roe": _relative(row, curve(
                 row.get("return_on_equity"), [(-10, 0), (0, 30), (15, 75), (30, 100)]
-            ),
-            "roa": curve(
+            ), "return_on_equity"),
+            "roa": _relative(row, curve(
                 row.get("return_on_assets"), [(-2, 0), (0, 35), (2, 70), (5, 100)]
-            ),
-            "net_margin": curve(
+            ), "return_on_assets"),
+            "net_margin": _relative(row, curve(
                 row.get("net_margin_pct"), [(-10, 0), (0, 35), (20, 100)]
-            ),
+            ), "net_margin_pct"),
             "earnings_growth": curve(
                 row.get("earnings_growth_yoy"), [(-30, 0), (0, 45), (30, 100)]
             ),
@@ -33,13 +80,13 @@ def score_long_term(row: dict) -> dict:
         }
     else:
         quality = {
-            "fcf_margin": curve(
+            "fcf_margin": _relative(row, curve(
                 row.get("fcf_margin_pct"), [(-10, 0), (0, 35), (10, 70), (25, 100)]
-            ),
-            "operating_margin": curve(
+            ), "fcf_margin_pct"),
+            "operating_margin": _relative(row, curve(
                 row.get("operating_margin_pct"),
                 [(-10, 0), (0, 30), (15, 75), (35, 100)],
-            ),
+            ), "operating_margin_pct"),
             "margin_trend": curve(
                 row.get("operating_margin_change_1y"), [(-10, 0), (0, 50), (10, 100)]
             ),
@@ -49,12 +96,12 @@ def score_long_term(row: dict) -> dict:
             "cash_conversion": curve(
                 row.get("cash_conversion"), [(0, 0), (0.8, 70), (1.5, 100), (3, 65)]
             ),
-            "returns": curve(
+            "returns": _relative(row, curve(
                 safe_nanmean(
                     [row.get("return_on_equity", np.nan), row.get("roic", np.nan)]
                 ),
                 [(-10, 0), (0, 30), (15, 75), (30, 100)],
-            ),
+            ), "capital_returns_pct"),
         }
         quality_weights = {
             "fcf_margin": 0.20,
@@ -69,20 +116,27 @@ def score_long_term(row: dict) -> dict:
     )
     historical_growth = weighted(
         {
-            "yoy": curve(row.get("revenue_growth_yoy"), [(-20, 0), (0, 40), (30, 100)]),
+            "yoy": _relative(
+                row,
+                curve(row.get("revenue_growth_yoy"), [(-20, 0), (0, 40), (30, 100)]),
+                "revenue_growth_yoy",
+            ),
             "cagr": curve(row.get("revenue_cagr_3y"), [(-10, 0), (0, 40), (20, 100)]),
         },
         {"yoy": 0.60, "cagr": 0.40},
         0,
     )[0]
     growth = {
-        "forward_revenue": curve(
+        "forward_revenue": _relative(row, curve(
             row.get("forward_revenue_growth"), [(-0.2, 0), (0, 40), (0.3, 100)]
-        ),
-        "forward_eps": curve(
+        ), "forward_revenue_growth"),
+        "forward_eps": _relative(row, curve(
             row.get("forward_eps_growth"), [(-0.3, 0), (0, 40), (0.4, 100)]
-        ),
+        ), "forward_eps_growth"),
         "historical_revenue": historical_growth,
+        "latest_quarter": curve(
+            row.get("revenue_growth_latest_quarter_yoy"), [(-20, 0), (0, 40), (30, 100)]
+        ),
         "acceleration": curve(
             row.get("growth_acceleration"), [(-20, 0), (0, 50), (20, 100)]
         ),
@@ -92,8 +146,9 @@ def score_long_term(row: dict) -> dict:
         {
             "forward_revenue": 0.30,
             "forward_eps": 0.30,
-            "historical_revenue": 0.25,
-            "acceleration": 0.15,
+            "historical_revenue": 0.20,
+            "latest_quarter": 0.10,
+            "acceleration": 0.10,
         },
         0.60,
     )
@@ -130,16 +185,7 @@ def score_long_term(row: dict) -> dict:
     valuation_score, valuation_coverage, valuation_status = weighted(
         valuation, valuation_weights, 0.50
     )
-    trend = {
-        "rs126": row.get("rs_126d_percentile"),
-        "rs252": row.get("rs_252d_percentile"),
-        "ma200": curve(
-            row.get("price_vs_ma200_pct"), [(-30, 0), (0, 55), (20, 100), (50, 60)]
-        ),
-    }
-    long_trend, trend_coverage, _ = weighted(
-        trend, {"rs126": 0.35, "rs252": 0.35, "ma200": 0.30}, 0.60
-    )
+    long_trend, trend_coverage = long_trend_pillar(row)
     if financial:
         safety = {
             "profitability": curve(
@@ -184,6 +230,7 @@ def score_long_term(row: dict) -> dict:
             "financial_safety": 0.05,
         },
         0.70,
+        neutral_fill=NEUTRAL,
     )
     if any(
         pd.isna(pillars[key])

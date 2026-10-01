@@ -52,18 +52,6 @@ def realized_return(
     return float((future / float(baseline_price) - 1) * 100)
 
 
-def pending_prediction_symbols(connection: sqlite3.Connection) -> set[str]:
-    """Pending history is independent of today's index membership."""
-    columns = " OR ".join(f"o.forward_{h}_return IS NULL" for h in HORIZONS)
-    return {
-        row[0]
-        for row in connection.execute(
-            f"SELECT DISTINCT p.symbol FROM prediction_snapshots p JOIN prediction_outcomes o "
-            f"USING(run_id,symbol) WHERE {columns}"
-        )
-    }
-
-
 def update_outcomes(
     connection: sqlite3.Connection,
     stock_history: Mapping[str, pd.Series],

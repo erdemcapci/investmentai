@@ -120,7 +120,7 @@ def test_credible_setup_is_eligible(monkeypatch, setup):
     assert pd.notna(short_term_module.score_short_term(row)["short_term_score"])
 
 
-def test_none_setup_is_never_eligible_even_with_numeric_quality(monkeypatch):
+def test_none_setup_is_ranked_and_keeps_its_label(monkeypatch):
     monkeypatch.setattr(short_term_module, "setup_scores", lambda _: {
         "pullback_setup_score": 50, "breakout_momentum_setup_score": 50,
         "setup_coverage": 1, "short_term_setup": "NONE",
@@ -131,8 +131,9 @@ def test_none_setup_is_never_eligible_even_with_numeric_quality(monkeypatch):
         "rs_126d_percentile": 70, "expectations_short_score": 70,
         "expectations_short_coverage": 1,
     })
-    assert np.isnan(result["short_term_score"])
-    assert result["short_term_status"] == "NO_CREDIBLE_SETUP"
+    # Model 3.3.0: the setup is a diagnostic label, not a ranking gate.
+    assert not np.isnan(result["short_term_score"])
+    assert result["short_term_setup"] == "NONE"
 
 
 def test_lt_and_st_drivers_use_their_own_pillars():
