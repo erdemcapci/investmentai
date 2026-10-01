@@ -1,0 +1,10 @@
+[theme]
+primaryColor = "#2a78d6"
+
+[server]
+headless = true
+# Only this computer can open the dashboard.
+address = "localhost"
+
+[browser]
+gatherUsageStats = false

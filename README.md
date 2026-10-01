@@ -38,6 +38,31 @@ unexpected failure, `2`
 configuration/universe failure, `3` invalid data quality, and `4` database schema
 failure.
 
+## Dashboard
+
+```bash
+python -m pip install -r requirements-ui.txt   # once
+streamlit run dashboard.py                     # opens http://localhost:8501
+```
+
+A read-only view of the saved results (it never calls Yahoo or writes data):
+
+- **Recommendations** — the action list with stop/target ranges, best long-term
+  holdings, and stocks strong on both horizons.
+- **Explore** — long-term vs short-term score scatter, searchable and sortable
+  table with selectable columns, CSV download.
+- **Stock detail** — price with 50/200-day averages and the trade plan levels,
+  pillar-by-pillar score breakdown and drivers.
+- **Sectors** — median scores, momentum and risk by sector, and where the
+  recommendations come from.
+- **Play with weights** — re-weight the pillars and see the ranking change
+  live (the saved results are unaffected).
+- **Model evidence** — the latest backtest's strategy results and signal
+  strength.
+
+Filters for index, sector, minimum confidence and imminent earnings apply to
+every tab. The server listens on localhost only.
+
 ## Outputs
 
 Each run contains `run_manifest.json`, `run.log`, `checkpoint.json`, `errors.csv`,

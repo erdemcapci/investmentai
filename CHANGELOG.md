@@ -20,6 +20,7 @@
   quarterly data at normal TTL expiry; forcing every entry to refresh at once
   hit Yahoo rate limits and removed the stale fallback.
 - Run log messages no longer print twice.
+- Added a read-only Streamlit dashboard (`streamlit run dashboard.py`).
 
 ## 1.2.0 (scoring model 3.2.0)
 
