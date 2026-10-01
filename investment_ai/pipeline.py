@@ -271,11 +271,8 @@ LT_DRIVER_SPECS = (
 )
 ST_DRIVER_SPECS = (
     ("Relative strength", "Relative Strength", "short_rs_score", SHORT_TERM_WEIGHTS["momentum"]),
-    ("Setup quality", "Setup Quality", "setup_quality_score", SHORT_TERM_WEIGHTS["setup"]),
     ("Short expectations", "Short Expectations", "expectations_short_score", SHORT_TERM_WEIGHTS["expectations"]),
     ("Earnings drift", "Earnings Drift", "earnings_drift_score", SHORT_TERM_WEIGHTS["earnings_drift"]),
-    ("Volume", "Volume", "volume_confirmation_score", SHORT_TERM_WEIGHTS["volume"]),
-    ("Technical trend", "Technical Trend", "technical_trend_score", SHORT_TERM_WEIGHTS["technical"]),
     ("Short interest", "Positioning", "positioning_score", SHORT_TERM_WEIGHTS["positioning"]),
 )
 

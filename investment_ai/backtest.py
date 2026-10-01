@@ -42,9 +42,12 @@ from investment_ai.features.peers import fallback_percentile
 from investment_ai.features.technical import (
     RS_METRICS,
     add_model_relative_strength,
+    earnings_drift_score,
+    earnings_reaction,
     price_features,
     setup_scores,
 )
+from investment_ai.scoring.action import trade_plan
 from investment_ai.scoring.common import weighted
 from investment_ai.scoring.long_term import long_trend_pillar
 from investment_ai.scoring.short_term import (
@@ -58,7 +61,8 @@ from investment_ai.scoring.short_term import (
 HORIZONS = (5, 10, 20)
 MIN_HISTORY_SESSIONS = 64
 TOP_N = 25
-PRICE_ONLY_PILLARS = ("momentum", "setup", "volume", "technical")
+# Model 3.2.0's price-pillar weights, kept to compare against production.
+COMPOSITE_3_2_0_WEIGHTS = {"momentum": 0.20, "setup": 0.20, "volume": 0.10, "technical": 0.05}
 
 
 def _close_panel(histories: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
@@ -125,11 +129,10 @@ def score_cross_section(features: pd.DataFrame, universe: pd.DataFrame, benchmar
         setups = [setup_scores(row) for row in records]
         volume = [volume_pillar(row) for row in records]
         technical = [technical_pillar(row) for row in records]
-        weights = {key: SHORT_TERM_WEIGHTS[key] for key in PRICE_ONLY_PILLARS}
         composite = [
             weighted(
                 {"momentum": m, "setup": s["setup_quality_score"], "volume": v, "technical": t},
-                weights,
+                COMPOSITE_3_2_0_WEIGHTS,
                 0.6,
             )[0]
             for m, s, v, t in zip(momentum, setups, volume, technical)
@@ -137,14 +140,14 @@ def score_cross_section(features: pd.DataFrame, universe: pd.DataFrame, benchmar
         signals[f"momentum_pillar_{basis}"] = momentum
         signals[f"st_price_composite_{basis}"] = composite
         signals[f"long_trend_pillar_{basis}"] = [long_trend_pillar(row)[0] for row in records]
-        if basis == "benchmark":
+        if basis == "raw":  # the production default basis
             signals["setup_quality"] = [s["setup_quality_score"] for s in setups]
             signals["credible_setup"] = [
                 100.0 if s["short_term_setup"] in CREDIBLE_SETUPS else 0.0 for s in setups
             ]
             signals["volume_pillar"] = volume
             signals["technical_pillar"] = technical
-            signals["credible_composite_benchmark"] = [
+            signals["credible_composite"] = [
                 c if s["short_term_setup"] in CREDIBLE_SETUPS else np.nan
                 for c, s in zip(composite, setups)
             ]
@@ -159,10 +162,221 @@ def score_cross_section(features: pd.DataFrame, universe: pd.DataFrame, benchmar
             frame["rs_20d_percentile"], frame["rs_60d_percentile"], frame["rs_126d_percentile"]
         )
     ]
-    output = frame[["symbol", "sector", "benchmark_symbol", "market_regime"]].copy()
+    columns = ["symbol", "sector", "benchmark_symbol", "market_regime", "volatility_20d", "volatility_60d"]
+    output = frame.reindex(columns=columns).copy()
     for name, values in signals.items():
         output[name] = values
     return output
+
+
+def earnings_event_table(
+    events: pd.DataFrame, stock: pd.Series, benchmark: pd.Series | None
+) -> pd.DataFrame:
+    """Per-report surprise, announcement reaction and the date it became known.
+
+    ``available_at`` is the close that completes the two-session reaction
+    window; a rebalance date may only use reports available by its close.
+    """
+    rows = []
+    if events is None or events.empty or stock is None or stock.dropna().empty:
+        return pd.DataFrame(columns=["event", "surprise_pct", "reaction_pct", "available_at"])
+    close = stock.dropna()
+    for event, surprise in zip(events.event, events.surprise_pct):
+        day = event.normalize()
+        after = close.index[close.index >= day]
+        if not len(after) or not len(close.index[close.index < day]):
+            continue
+        available = after[min(1, len(after) - 1)]
+        reaction = earnings_reaction(close.loc[:available], benchmark, event)
+        value = reaction["earnings_reaction_excess_pct"]
+        if pd.isna(value):
+            value = reaction["earnings_reaction_pct"]
+        rows.append({"event": event, "surprise_pct": surprise, "reaction_pct": value, "available_at": available})
+    return pd.DataFrame(rows)
+
+
+def drift_as_of(tables: dict[str, pd.DataFrame], symbols: pd.Series, as_of: pd.Timestamp) -> pd.Series:
+    """Point-in-time earnings drift score for each symbol on ``as_of``."""
+    values = []
+    for symbol in symbols:
+        table = tables.get(symbol)
+        known = table[table.available_at <= as_of] if table is not None and len(table) else None
+        if known is None or known.empty:
+            values.append(np.nan)
+            continue
+        last = known.iloc[-1]
+        days = (as_of - last.event).total_seconds() / 86400
+        values.append(earnings_drift_score(last.surprise_pct, last.reaction_pct, days))
+    return pd.Series(values, index=symbols.index, dtype=float)
+
+
+def load_earnings_events(symbols: list[str], workers: int = 4) -> dict[str, pd.DataFrame]:
+    """Historical report dates and EPS surprises from Yahoo, cached for a week."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import yfinance as yf
+
+    from investment_ai.config import CACHE_DIR
+    from investment_ai.data.cache import JsonCache
+    from investment_ai.data.yahoo import call_with_retry
+
+    cache = JsonCache(CACHE_DIR)
+
+    def fetch(symbol: str) -> dict:
+        frame = call_with_retry(lambda: yf.Ticker(symbol).get_earnings_dates(limit=60))
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return {}
+        column = next(
+            (c for c in frame if str(c).replace(" ", "").lower() in {"surprise(%)", "surprise%"}),
+            None,
+        )
+        if column is None:
+            return {}
+        surprises = pd.to_numeric(frame[column], errors="coerce").dropna()
+        return {"events": [[str(pd.Timestamp(i).tz_convert("UTC")), float(v)] for i, v in surprises.items()]}
+
+    def load(symbol: str) -> tuple[str, pd.DataFrame]:
+        item, _ = cache.get_or_fetch(
+            "backtest_earnings_events", symbol, 24 * 7, lambda: fetch(symbol),
+            validator=lambda data: bool(data.get("events")),
+        )
+        events = item.get("data", {}).get("events", [])
+        frame = pd.DataFrame(events, columns=["event", "surprise_pct"])
+        frame["event"] = pd.to_datetime(frame.event, utc=True)
+        return symbol, frame.sort_values("event").reset_index(drop=True)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(pool.map(load, symbols))
+
+
+STRATEGY_PICKS = 20
+STRATEGY_MAX_PER_SECTOR = 3
+HOLD_SESSIONS = 10
+
+
+def strategy_definitions(scored: pd.DataFrame) -> dict[str, pd.Series]:
+    """Candidate short-term selection rules, each as a ranking signal.
+
+    NaN excludes a security; the highest values are bought.
+    """
+    credible = scored.credible_setup.eq(100)
+    drift = scored.get("earnings_drift", pd.Series(np.nan, index=scored.index))
+    # Production short-term weights restricted to the replayable pillars.
+    production = pd.Series(
+        [
+            weighted(
+                {"momentum": m, "earnings_drift": d},
+                {key: SHORT_TERM_WEIGHTS[key] for key in ("momentum", "earnings_drift")},
+                0.5,
+                neutral_fill=50,
+            )[0]
+            for m, d in zip(scored.momentum_pillar_raw, drift)
+        ],
+        index=scored.index,
+    )
+    definitions = {
+        "production_price_model": production,
+        "momentum_all": scored.momentum_pillar_raw,
+        "gated_momentum": scored.momentum_pillar_raw.where(credible),
+        "gated_composite_3_2_0": scored.st_price_composite_raw.where(credible),
+    }
+    if "earnings_drift" in scored:
+        definitions["drift_all"] = drift
+    return definitions
+
+
+def _pick(scored: pd.DataFrame, signal: pd.Series) -> pd.DataFrame:
+    ranked = scored.assign(_signal=signal).dropna(subset=["_signal"])
+    ranked = ranked.sort_values(["_signal", "symbol"], ascending=[False, True], kind="stable")
+    sector = ranked.sector.fillna("")
+    ranked = ranked[sector.groupby(sector).cumcount() < STRATEGY_MAX_PER_SECTOR]
+    return ranked.head(STRATEGY_PICKS)
+
+
+def simulate_trades(
+    picks: pd.DataFrame, closes: pd.DataFrame, bench: pd.DataFrame, position: int, cost_bps: float
+) -> list[dict]:
+    """Hold ten sessions, and separately follow the production trade plan.
+
+    Entry is the next session's close. The trade-plan exit checks closes only
+    (no intraday highs or lows): the first close at or below the stop or at or
+    above the target ends the trade, otherwise it exits after ten sessions.
+    """
+    entry = position + 1
+    final = entry + HOLD_SESSIONS
+    if final >= len(closes):
+        return []
+    round_trip = 2 * cost_bps / 100
+    trades = []
+    for row in picks.to_dict("records"):
+        if row["symbol"] not in closes:
+            continue
+        path = closes[row["symbol"]].iloc[entry:final + 1]
+        market = bench.get(row["benchmark_symbol"])
+        if path.isna().any() or market is None:
+            continue
+        market_path = market.iloc[entry:final + 1]
+        start = path.iloc[0]
+        plan = trade_plan({**row, "current_price": start})
+        exits = {"hold_10": (HOLD_SESSIONS, "TIME")}
+        if pd.notna(plan["stop_loss_price"]):
+            exit_at, reason = HOLD_SESSIONS, "TIME"
+            for day in range(1, HOLD_SESSIONS + 1):
+                price = path.iloc[day]
+                if price <= plan["stop_loss_price"]:
+                    exit_at, reason = day, "STOP"
+                    break
+                if price >= plan["target_price"]:
+                    exit_at, reason = day, "TARGET"
+                    break
+            exits["trade_plan"] = (exit_at, reason)
+        for mode, (day, reason) in exits.items():
+            stock_return = (path.iloc[day] / start - 1) * 100
+            market_return = (market_path.iloc[day] / market_path.iloc[0] - 1) * 100
+            trades.append(
+                {
+                    "symbol": row["symbol"],
+                    "exit_mode": mode,
+                    "exit_reason": reason,
+                    "sessions_held": day,
+                    "return_net_pct": stock_return - round_trip,
+                    "excess_net_pct": stock_return - market_return - round_trip,
+                }
+            )
+    return trades
+
+
+def summarize_strategies(trades: pd.DataFrame, step: int) -> pd.DataFrame:
+    """Per strategy and exit mode: trade and per-rebalance portfolio statistics."""
+    if trades.empty:
+        return pd.DataFrame()
+    rows = []
+    for (strategy, mode), group in trades.groupby(["strategy", "exit_mode"], sort=True):
+        portfolio = group.groupby("as_of").excess_net_pct.mean()
+        n_effective = max(len(portfolio) * min(1.0, step / HOLD_SESSIONS), 1.0)
+        std = portfolio.std(ddof=1) if len(portfolio) > 1 else np.nan
+        rows.append(
+            {
+                "strategy": strategy,
+                "exit_mode": mode,
+                "rebalances": len(portfolio),
+                "trades": len(group),
+                "mean_trade_excess_net_pct": group.excess_net_pct.mean(),
+                "median_trade_excess_net_pct": group.excess_net_pct.median(),
+                "trade_win_rate": group.excess_net_pct.gt(0).mean(),
+                "mean_portfolio_excess_net_pct": portfolio.mean(),
+                "portfolio_t_stat": portfolio.mean() / (std / np.sqrt(n_effective))
+                if std and np.isfinite(std) and std > 0 else np.nan,
+                "portfolio_win_rate": portfolio.gt(0).mean(),
+                "worst_portfolio_excess_pct": portfolio.min(),
+                "mean_sessions_held": group.sessions_held.mean(),
+                "stop_rate": group.exit_reason.eq("STOP").mean(),
+                "target_rate": group.exit_reason.eq("TARGET").mean(),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(
+        ["exit_mode", "mean_portfolio_excess_net_pct"], ascending=[True, False]
+    ).reset_index(drop=True)
 
 
 def _forward_returns(
@@ -188,8 +402,9 @@ def run_backtest(
     cost_bps: float = 10.0,
     horizons: tuple[int, ...] = HORIZONS,
     progress=None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (per-date observations, per-signal summary)."""
+    earnings_events: dict[str, pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return (observations, signal summary, trades, strategy summary)."""
     universe = universe.drop_duplicates("symbol").copy()
     universe["sector"] = universe.get("sector", pd.Series("", index=universe.index)).fillna("")
     symbols = universe.symbol.tolist()
@@ -201,9 +416,17 @@ def run_backtest(
     bench = bench.reindex(closes.index).ffill(limit=5)
     stock_history = _symbol_histories(histories, symbols)
     bench_history = _symbol_histories(histories, benchmark_symbols)
-    last = len(closes) - 2 - max(horizons)
+    last = len(closes) - 2 - max(max(horizons), HOLD_SESSIONS)
     positions = list(range(MIN_HISTORY_SESSIONS, last + 1, step))
-    rows = []
+    event_tables = {}
+    if earnings_events is not None:
+        regions = dict(zip(universe.symbol, universe.index_name.map(lambda v: assign_benchmark(v)[0])))
+        for symbol, events in earnings_events.items():
+            if symbol in closes:
+                event_tables[symbol] = earnings_event_table(
+                    events, closes[symbol], bench.get(regions.get(symbol))
+                )
+    rows, trades = [], []
     for count, position in enumerate(positions, 1):
         as_of = closes.index[position]
         features = _features_as_of(stock_history, symbols, as_of)
@@ -212,6 +435,11 @@ def run_backtest(
             continue
         scored = score_cross_section(features, universe, benchmark_features)
         scored["as_of"] = as_of
+        if earnings_events is not None:
+            scored["earnings_drift"] = drift_as_of(event_tables, scored.symbol, as_of)
+        for name, signal in strategy_definitions(scored).items():
+            for trade in simulate_trades(_pick(scored, signal), closes, bench, position, cost_bps):
+                trades.append({"as_of": as_of, "strategy": name, **trade})
         for horizon in horizons:
             raw, excess = _forward_returns(
                 closes, bench, position, horizon, scored.symbol, scored.benchmark_symbol
@@ -224,11 +452,18 @@ def run_backtest(
     if not rows:
         raise ValueError("not enough history for any rebalance date")
     panel = pd.concat(rows, ignore_index=True)
-    return panel, summarize(panel, step, cost_bps, horizons)
+    trade_frame = pd.DataFrame(trades)
+    return (
+        panel,
+        summarize(panel, step, cost_bps, horizons),
+        trade_frame,
+        summarize_strategies(trade_frame, step),
+    )
 
 
 def _signal_columns(panel: pd.DataFrame) -> list[str]:
-    excluded = {"symbol", "sector", "benchmark_symbol", "market_regime", "as_of"}
+    excluded = {"symbol", "sector", "benchmark_symbol", "market_regime", "as_of",
+                "volatility_20d", "volatility_60d"}
     return [c for c in panel if c not in excluded and not c.startswith("forward_")]
 
 
@@ -332,21 +567,33 @@ def load_histories(universe: pd.DataFrame, years: float | None) -> pd.DataFrame:
         connection.close()
 
 
-def run_backtest_cli(years: float | None = None, step: int = 5, cost_bps: float = 10.0) -> int:
+def run_backtest_cli(
+    years: float | None = None, step: int = 5, cost_bps: float = 10.0, earnings: bool = False
+) -> int:
     if step < 1:
         raise ValueError("--backtest-step must be >= 1")
     universe = latest_universe()
     histories = load_histories(universe, years)
+    events = None
+    if earnings:
+        from investment_ai.config import MAX_WORKERS
+
+        print("loading earnings history for the drift backtest...", flush=True)
+        events = load_earnings_events(universe.symbol.tolist(), MAX_WORKERS)
 
     def progress(count: int, total: int, as_of: pd.Timestamp) -> None:
         if count == 1 or count % 10 == 0 or count == total:
             print(f"backtest {count}/{total} as of {as_of.date()}", flush=True)
 
-    panel, summary = run_backtest(histories, universe, step, cost_bps, progress=progress)
+    panel, summary, trades, strategies = run_backtest(
+        histories, universe, step, cost_bps, progress=progress, earnings_events=events
+    )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     directory = Path(BACKTEST_DIR) / f"backtest-{stamp}"
     directory.mkdir(parents=True, exist_ok=True)
     summary.to_csv(directory / "signal_summary.csv", index=False)
+    strategies.to_csv(directory / "strategy_summary.csv", index=False)
+    trades.to_csv(directory / "trades.csv", index=False)
     panel.to_csv(directory / "observations.csv", index=False)
     manifest = {
         "scoring_model_version": SCORING_MODEL_VERSION,
@@ -359,6 +606,13 @@ def run_backtest_cli(years: float | None = None, step: int = 5, cost_bps: float 
         "step_sessions": step,
         "one_way_cost_bps": cost_bps,
         "entry": "next session close after the signal date",
+        "earnings_drift_included": bool(earnings),
+        "strategy_rules": {
+            "picks": STRATEGY_PICKS,
+            "max_per_sector": STRATEGY_MAX_PER_SECTOR,
+            "holding_sessions": HOLD_SESSIONS,
+            "trade_plan_exit": "first close at or below stop or at or above target",
+        },
         "target": "forward excess return over the assigned regional benchmark",
         "biases": [
             "survivorship: today's constituents only",
@@ -369,5 +623,7 @@ def run_backtest_cli(years: float | None = None, step: int = 5, cost_bps: float 
     (directory / "backtest_manifest.json").write_text(json.dumps(manifest, indent=2))
     with pd.option_context("display.width", 200, "display.max_rows", 200):
         print(summary.round(3).to_string(index=False))
+        print("\nSTRATEGIES (top 20, max 3 per sector, net of costs, excess vs benchmark)\n")
+        print(strategies.round(3).to_string(index=False))
     print(f"\nBacktest written to {directory}")
     return 0

@@ -257,15 +257,15 @@ def test_ranking_follows_the_risk_adjusted_score():
 
 def test_trade_plan_scales_with_volatility_and_regime():
     plan = trade_plan({"current_price": 100, "volatility_20d": 30, "market_regime": RISK_ON})
-    expected_stop = 30 / np.sqrt(252) * np.sqrt(10)
+    expected_stop = 2 * 30 / np.sqrt(252) * np.sqrt(10)
     assert plan["stop_loss_pct"] == pytest.approx(expected_stop)
     assert plan["stop_loss_price"] == pytest.approx(100 - expected_stop)
     assert plan["target_price"] == pytest.approx(100 + 1.5 * expected_stop)
-    # 1% portfolio risk at a ~6% stop would be ~17%, so the 10% cap binds.
-    assert plan["suggested_position_pct"] == pytest.approx(10)
+    assert plan["suggested_position_pct"] == pytest.approx(100 / expected_stop)
+    # A ~4% stop would size at ~25%, so the 10% cap binds.
+    calm = trade_plan({"current_price": 100, "volatility_20d": 10, "market_regime": RISK_ON})
+    assert calm["suggested_position_pct"] == pytest.approx(10)
     volatile = trade_plan({"current_price": 100, "volatility_20d": 60, "market_regime": RISK_ON})
-    volatile_stop = 60 / np.sqrt(252) * np.sqrt(10)
-    assert volatile["suggested_position_pct"] == pytest.approx(100 / volatile_stop)
     defensive = trade_plan({"current_price": 100, "volatility_20d": 60, "market_regime": RISK_OFF})
     assert defensive["suggested_position_pct"] == pytest.approx(volatile["suggested_position_pct"] / 2)
     assert math.isnan(trade_plan({"current_price": 100})["stop_loss_pct"])
@@ -330,14 +330,14 @@ def test_backtest_is_point_in_time():
         }
     )
     histories = _synthetic_histories(symbols + ["^GSPC", "^STOXX"])
-    panel, summary = run_backtest(histories, universe, step=20, horizons=(5,))
+    panel, summary, _, _ = run_backtest(histories, universe, step=20, horizons=(5,))
     assert not summary.empty and panel.as_of.nunique() >= 2
     first = panel.as_of.min()
     # Rewriting everything after the first rebalance date must not change the
     # signals observed on that date.
     tampered = histories.copy()
     tampered.loc[tampered.index > first.tz_localize(None)] *= 3
-    replay, _ = run_backtest(tampered, universe, step=20, horizons=(5,))
+    replay, _, _, _ = run_backtest(tampered, universe, step=20, horizons=(5,))
     signals = [c for c in panel if c.startswith(("rs_", "momentum_pillar", "setup_quality"))]
     original = panel[panel.as_of.eq(first)].set_index("symbol")[signals]
     altered = replay[replay.as_of.eq(first)].set_index("symbol")[signals]
@@ -348,3 +348,54 @@ def test_backtest_is_point_in_time():
     expected = (closes["S0"].iloc[position + 6] / closes["S0"].iloc[position + 1] - 1) * 100
     observed = panel[(panel.as_of == first) & (panel.symbol == "S0")].forward_5d_return.iloc[0]
     assert observed == pytest.approx(expected)
+
+
+def test_drift_backtest_only_uses_reports_known_by_the_close():
+    from investment_ai.backtest import drift_as_of, earnings_event_table
+
+    dates = pd.bdate_range("2026-01-05", periods=8, tz="UTC")
+    stock = pd.Series([100, 100, 100, 110, 112, 112, 112, 112], index=dates, dtype=float)
+    events = pd.DataFrame(
+        {"event": pd.to_datetime(["2026-01-07 21:00:00+00:00"], utc=True), "surprise_pct": [12.0]}
+    )
+    table = earnings_event_table(events, stock, None)
+    # After-close report on 7 Jan: the reaction completes at the 8 Jan close.
+    assert table.available_at.iloc[0] == dates[3]
+    assert table.reaction_pct.iloc[0] == pytest.approx(10)
+    symbols = pd.Series(["X"])
+    assert math.isnan(drift_as_of({"X": table}, symbols, dates[2]).iloc[0])
+    assert drift_as_of({"X": table}, symbols, dates[3]).iloc[0] > 50
+
+
+def test_trade_simulation_exits_at_stop_target_or_time():
+    from investment_ai.backtest import simulate_trades
+
+    dates = pd.bdate_range("2026-01-05", periods=14, tz="UTC")
+    flat = [100.0] * 14
+    closes = pd.DataFrame(
+        {
+            "UP": flat[:3] + [130.0] * 11,
+            "DOWN": flat[:3] + [80.0] * 11,
+            "FLAT": flat,
+        },
+        index=dates,
+    )
+    bench = pd.DataFrame({"^GSPC": flat}, index=dates)
+    picks = pd.DataFrame(
+        {
+            "symbol": ["UP", "DOWN", "FLAT"],
+            "benchmark_symbol": ["^GSPC"] * 3,
+            "volatility_20d": [30.0] * 3,
+            "market_regime": [RISK_ON] * 3,
+        }
+    )
+    trades = pd.DataFrame(simulate_trades(picks, closes, bench, position=0, cost_bps=0))
+    plan = trades[trades.exit_mode.eq("trade_plan")].set_index("symbol")
+    assert plan.loc["UP", "exit_reason"] == "TARGET" and plan.loc["UP", "sessions_held"] == 2
+    assert plan.loc["DOWN", "exit_reason"] == "STOP"
+    assert plan.loc["DOWN", "excess_net_pct"] == pytest.approx(-20)
+    assert plan.loc["FLAT", "exit_reason"] == "TIME"
+    held = trades[trades.exit_mode.eq("hold_10")].set_index("symbol")
+    assert held.loc["UP", "excess_net_pct"] == pytest.approx(30)
+    # Exits are evaluated on closes, so a gap through the stop is taken in full.
+    assert held.loc["DOWN", "sessions_held"] == 10

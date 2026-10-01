@@ -17,13 +17,17 @@ from investment_ai.scoring.common import (
 
 NO_CREDIBLE_SETUP = "NO_CREDIBLE_SETUP"
 CREDIBLE_SETUPS = {"PULLBACK", "BREAKOUT", "MOMENTUM_CONTINUATION", "MIXED"}
+# Model 3.3.0 weights follow the 5-year walk-forward backtest (2021-2026):
+# a top-20 momentum list earned +0.71% excess per 10 sessions net of costs
+# (t = 2.6), while blending in the setup, volume and technical pillars cut that
+# to +0.06%.  Those pillars are still computed and exported as diagnostics but
+# carry no weight.  Expectations and short interest cannot be replayed and keep
+# literature-based weights; earnings drift (IC t = 2.0) is kept small because a
+# larger share diluted momentum.
 SHORT_TERM_WEIGHTS = {
-    "momentum": 0.20,
-    "setup": 0.20,
+    "momentum": 0.65,
     "expectations": 0.20,
-    "earnings_drift": 0.20,
-    "volume": 0.10,
-    "technical": 0.05,
+    "earnings_drift": 0.10,
     "positioning": 0.05,
 }
 
@@ -96,11 +100,8 @@ def score_short_term(row: dict) -> dict:
     positioning = positioning_pillar(row)
     pillars = {
         "momentum": relative_strength,
-        "setup": setup["setup_quality_score"],
         "expectations": row.get("expectations_short_score"),
         "earnings_drift": drift,
-        "volume": volume,
-        "technical": technical,
         "positioning": positioning,
     }
     weights = dict(SHORT_TERM_WEIGHTS)
@@ -110,14 +111,12 @@ def score_short_term(row: dict) -> dict:
     score, coverage, status = weighted(pillars, weights, 0.60, neutral_fill=NEUTRAL)
     core_ok = (
         pd.notna(relative_strength)
-        and pd.notna(setup["setup_quality_score"])
-        and setup["setup_coverage"] >= 0.70
         and pd.notna(row.get("expectations_short_score"))
         and row.get("expectations_short_coverage", 0) >= 0.60
     )
-    if setup["short_term_setup"] not in CREDIBLE_SETUPS:
-        score, status = np.nan, NO_CREDIBLE_SETUP
-    elif not core_ok:
+    # The setup label no longer gates ranking: in the backtest, restricting
+    # the list to credible setups halved the momentum list's excess return.
+    if not core_ok:
         score, status = np.nan, INSUFFICIENT_DATA
     return {
         **setup,

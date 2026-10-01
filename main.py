@@ -267,7 +267,7 @@ def methodology() -> pd.DataFrame:
             },
             {
                 "score": "Short term",
-                "formula": "20% Relative Strength (50% 12-1, 30% 6-1 month momentum, 20% 60d) + 20% Setup + 20% Short-Term Expectations + 20% Earnings Drift + 10% Signed Volume + 5% Technical Trend + 5% Short Interest; momentum weight halves in REBOUND_RISK regimes; missing non-core pillars count as neutral",
+                "formula": "65% Relative Strength (50% 12-1, 30% 6-1 month momentum, 20% 60d) + 20% Short-Term Expectations + 10% Earnings Drift + 5% Short Interest; setup, volume and technical scores are exported labels with no weight and do not gate ranking; momentum weight halves in REBOUND_RISK regimes; missing non-core pillars count as neutral",
             },
             {
                 "score": "Relative strength basis",
@@ -279,7 +279,7 @@ def methodology() -> pd.DataFrame:
             },
             {
                 "score": "Action list",
-                "formula": "Credible short-term setups inside the top half of the long-term ranking, ordered by risk-adjusted short-term score, at most 3 per sector; stop = 1 sigma of a 10-session move, target = 1.5x stop distance, size risks 1% of the portfolio (halved outside RISK_ON)",
+                "formula": "Short-term ranked names inside the top half of the long-term ranking, ordered by risk-adjusted short-term score, at most 3 per sector; stop = 2 sigma of a 10-session move, target = 1.5x stop distance, size risks 1% of the portfolio (halved outside RISK_ON)",
             },
         ]
     )
@@ -394,6 +394,11 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="sessions between backtest rebalance dates (default 5)",
+    )
+    parser.add_argument(
+        "--backtest-earnings",
+        action="store_true",
+        help="also backtest earnings drift (fetches report history from Yahoo)",
     )
     parser.add_argument(
         "--backtest-cost-bps",
@@ -1230,6 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
             years=args.backtest_years,
             step=args.backtest_step,
             cost_bps=args.backtest_cost_bps,
+            earnings=args.backtest_earnings,
         )
     return execute(
         args.replay or args.rescore or args.resume,

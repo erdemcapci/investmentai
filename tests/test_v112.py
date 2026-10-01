@@ -183,7 +183,7 @@ def test_benchmark_sessions_control_maturity_and_stock_can_remain_missing(tmp_pa
 
 def test_validation_defaults_to_current_model_only(tmp_path):
     store = HistoryStore(tmp_path / "history.db")
-    for version, run_id, outcome in (("3.1.1", "old", -20), ("3.2.0", "new", 10)):
+    for version, run_id, outcome in (("3.1.1", "old", -20), ("3.3.0", "new", 10)):
         rows = [
             {"symbol": f"S{i}", "short_term_score": i, "short_term_rank": i + 1}
             for i in range(10)

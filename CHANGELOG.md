@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.0 (scoring model 3.3.0)
+
+- Reweighted the short-term model on 5-year backtest evidence: Relative
+  Strength 65%, Short-Term Expectations 20%, Earnings Drift 10%, Short
+  Interest 5%. Setup, volume and technical scores remain as zero-weight labels.
+- The credible-setup requirement no longer gates short-term ranking; the setup
+  stays in `short_term_setup` as a label.
+- The trade-plan stop widened from one to two ten-session standard deviations
+  (3–25%); the target remains 1.5 times the stop distance.
+- The action list takes short-term ranked names instead of credible setups only.
+- Backtest strategies now include the production price model and the 3.2.0
+  composite for comparison.
+
 ## 1.2.0 (scoring model 3.2.0)
 
 - Short term: removed the double-counted one-day return from the pullback score;
@@ -21,6 +34,11 @@
 - New `python main.py --backtest` walk-forward harness for the price signals.
 - The fundamentals cache refreshes once to capture quarterly statements.
 - Tests no longer write run folders, caches or history into the working tree.
+- Backtest: `--backtest-earnings` replays the Earnings Drift pillar from Yahoo
+  report history; strategy simulation compares gated and ungated short-term
+  lists with 10-session holds and trade-plan stop/target exits.
+- `scripts/install_daily_run.sh` schedules a weekday launchd run for live
+  validation.
 
 ## 1.1.5
 

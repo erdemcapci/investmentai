@@ -1,4 +1,4 @@
-# Investment AI 1.2.0
+# Investment AI 1.3.0
 
 Investment AI is a deterministic, auditable research system that ranks the combined
 S&P 500 and STOXX Europe 600 universe. It produces separate long-term investment and
@@ -65,20 +65,23 @@ non-core pillar counts as neutral (50) instead of re-weighting the rest.
 
 ## Short-term methodology
 
-The score combines Relative Strength (20%), Setup Quality (20%), Short-Term
-Expectations (20%), Earnings Drift (20%), Signed Volume (10%), Technical Trend
-(5%) and Short Interest (5%). Only credible pullback, breakout, continuation, or
-mixed setups can be ranked; `NONE` is reported as `NO_CREDIBLE_SETUP`.
+Model 3.3.0 weights follow the 5-year walk-forward backtest (see Backtest):
+Relative Strength 65%, Short-Term Expectations 20%, Earnings Drift 10%, and
+Short Interest 5%. Ranking needs Relative Strength and Short-Term Expectations.
 
 - Relative Strength is 50% 12-1 month, 30% 6-1 month and 20% 60-day momentum
-  percentiles. In the 5-year backtest these were the only price signals with a
-  consistently positive IC; 20-day strength and 20-day reversal were near zero.
-- A pullback is credible only above the 200-day average with at least median
-  60-day strength, and the setup thresholds are 65.
+  percentiles. Over 2021–2026, a top-20 list ranked on it alone earned +0.71%
+  excess return per 10 sessions after costs (t = 2.6).
 - Earnings Drift scores the last EPS surprise and the two-session announcement
-  reaction versus the benchmark, decaying to neutral between 45 and 90 days.
-- Signed Volume rewards heavy volume on up moves and light volume on pullbacks.
-- Event timing is no longer an alpha pillar; it remains a risk input.
+  reaction versus the benchmark, decaying to neutral between 45 and 90 days
+  (IC t = 2.0). A larger weight diluted momentum, so it is 10%.
+- Setup (pullback, breakout, continuation, mixed), signed volume and technical
+  trend are still computed and exported. They have no weight and no longer
+  restrict which stocks rank, because in the backtest the setup filter halved the
+  momentum list's return and adding these pillars cut it to +0.06%.
+- Short-Term Expectations and Short Interest cannot be replayed historically, so
+  their weights rest on published evidence until live validation accumulates.
+- Event timing is a risk input only.
 - In a `REBOUND_RISK` market regime (benchmark below its 200-day average but up
   5%+ over 20 days) the momentum weight halves, because momentum crashes cluster
   there.
@@ -92,12 +95,13 @@ Ranks sort by a risk-adjusted score: `score - 0.20 x max(risk - 50, 0)`, minus 5
 short-term points when earnings are due within 2 days. Raw scores remain
 exported.
 
-`action_list.csv` is the "what to act on" view. It keeps credible short-term
-setups that sit in the top half of the long-term ranking, orders them by
+`action_list.csv` is the "what to act on" view. It keeps short-term ranked
+names that sit in the top half of the long-term ranking (this long-term filter
+cannot be backtested), orders them by
 risk-adjusted short-term score, and allows at most 3 per sector (20 names by
 default). Each row carries a trade plan:
 
-- stop = one standard deviation of a 10-session move below the last close (3–15%);
+- stop = two standard deviations of a 10-session move below the last close (3–25%);
 - target = 1.5 times the stop distance above;
 - `suggested_position_pct` risks 1% of the portfolio at the stop (capped at 10%);
 - `portfolio_weight_pct` spreads the list by equal risk and sums to at most 100%;
@@ -126,6 +130,20 @@ SQLite schema 5 uses WAL, a busy timeout, explicit metadata versioning, normaliz
 `analyst_observations`, idempotent ranking history, immutable `prediction_snapshots`,
 and attach-only `prediction_outcomes`. The wide `analyst_snapshots` table is retained
 as archival data but the product flow does not write it.
+
+## Scheduled daily run
+
+Live validation needs one capture per trading day. To schedule one at 03:30
+local time, Tuesday to Saturday (after the US close has become a completed UTC
+day), run:
+
+```bash
+scripts/install_daily_run.sh     # installs a launchd job for this user
+scripts/uninstall_daily_run.sh   # removes it
+```
+
+A run missed while the Mac sleeps starts when it wakes. Logs are written to
+`investment_ai_logs/`, and overlapping runs are skipped.
 
 ## Resume and replay
 
@@ -161,6 +179,7 @@ The assigned benchmark's trend also sets `market_regime`.
 ```bash
 python main.py --backtest                     # local ~2-year price store
 python main.py --backtest --backtest-years 5  # download a longer history
+python main.py --backtest --backtest-years 5 --backtest-earnings  # add earnings drift
 ```
 
 The backtest replays the price-based signals weekly (`--backtest-step`, default 5
@@ -170,6 +189,32 @@ per signal and horizon (5/10/20 sessions): mean Spearman IC against forward exce
 return, an overlap-adjusted t-statistic, IC hit rate, top-minus-bottom decile
 spread, top-25 excess return net of `--backtest-cost-bps` (default 10 one way),
 and IC by market regime. Results go to `investment_ai_backtests/`.
+
+With `--backtest-earnings` it also fetches each stock's report history (dates and
+EPS surprises, cached for a week) and scores the Earnings Drift pillar on each
+date using only reports whose two-session reaction had completed by that close.
+
+It also simulates candidate short-term strategies (`strategy_summary.csv`,
+`trades.csv`): top 20 names, at most 3 per sector, entered at the next close and
+either held 10 sessions or exited by the production trade plan (first close at
+or below the stop or at or above the target). Exits use closes only, so gaps
+through a stop are taken in full. Strategies compare the production price model
+with momentum alone, drift alone, and the 3.2.0 setup-gated composite.
+
+Results of the 5-year run (2021-11 to 2026-08, 246 weekly dates, 10 bps each
+way), per 10-session trade:
+
+| Strategy | Excess net | t-stat |
+|---|---|---|
+| Momentum, no setup gate (basis of 3.3.0) | +0.71% | 2.6 |
+| Momentum, credible setups only | +0.32% | 1.4 |
+| 3.2.0 composite, credible setups only | +0.12% | 0.7 |
+| Earnings drift only | +0.23% | 1.3 |
+
+A one-sigma stop with a 1.5-sigma target lowered the momentum list to +0.57%;
+a two-sigma stop cost little (+0.66%). These figures are in-sample (the
+momentum weights were chosen on the same period) and subject to survivorship
+bias, so expect live results to be weaker.
 
 Analyst, valuation and fundamental pillars have no point-in-time history and are
 not replayed; the live validation below covers them. The universe and sector
