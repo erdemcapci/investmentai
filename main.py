@@ -319,7 +319,7 @@ def _rank_changes(
     values = []
     statuses = []
     for row in result.to_dict("records"):
-        old = store.changes_by_field(row["symbol"], 7, started)
+        old = store.changes_by_field(row["symbol"], 7, started, SCORING_MODEL_VERSION)
         if not old:
             values.append((np.nan, np.nan, np.nan, np.nan, "NEW"))
             statuses.append(("HISTORY_NOT_YET_AVAILABLE",) * 4)

@@ -11,7 +11,6 @@ from typing import Callable, Mapping, Any
 
 from investment_ai.data.constituents import YAHOO_SUFFIX_BY_COUNTRY
 
-STATUSES = {"VERIFIED", "HEURISTIC", "UNRESOLVED", "AMBIGUOUS", "STALE_MAPPING"}
 KNOWN_EXCEPTIONS = {
     ("sweden", "ATCOA"): "ATCO-A.ST",
     ("sweden", "ERICB"): "ERIC-B.ST",

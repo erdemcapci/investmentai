@@ -399,3 +399,26 @@ def test_trade_simulation_exits_at_stop_target_or_time():
     assert held.loc["UP", "excess_net_pct"] == pytest.approx(30)
     # Exits are evaluated on closes, so a gap through the stop is taken in full.
     assert held.loc["DOWN", "sessions_held"] == 10
+
+
+def test_rank_changes_only_compare_runs_of_the_same_model(tmp_path):
+    from datetime import datetime, timezone
+
+    from investment_ai.data.history_store import HistoryStore
+
+    store = HistoryStore(tmp_path / "history.sqlite")
+    for run_id, timestamp, version, rank in (
+        ("old", "2026-09-01T00:00:00+00:00", "3.1.2", 5),
+        ("new", "2026-09-02T00:00:00+00:00", "3.3.0", 40),
+    ):
+        row = {"symbol": "A", "long_term_rank": rank, "long_term_score": 60}
+        store.save_rankings(run_id, timestamp, [row])
+        store.save_predictions(run_id, timestamp, version, [row])
+    as_of = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    assert store.changes_by_field("A", 7, as_of)["long_term_rank"] == 40
+    assert store.changes_by_field("A", 7, as_of, "3.3.0")["long_term_rank"] == 40
+    assert store.changes_by_field("A", 7, as_of, "3.1.2")["long_term_rank"] == 5
+    missing = store.changes_by_field("A", 7, as_of, "9.9.9")
+    assert missing["long_term_rank"] is None
+    assert missing["long_term_rank_history_status"] == "NO_VALID_HISTORICAL_VALUE"
+    store.close()

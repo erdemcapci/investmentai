@@ -15,7 +15,6 @@ from investment_ai.scoring.common import (
     weighted,
 )
 
-NO_CREDIBLE_SETUP = "NO_CREDIBLE_SETUP"
 CREDIBLE_SETUPS = {"PULLBACK", "BREAKOUT", "MOMENTUM_CONTINUATION", "MIXED"}
 # Model 3.3.0 weights follow the 5-year walk-forward backtest (2021-2026):
 # a top-20 momentum list earned +0.71% excess per 10 sessions net of costs

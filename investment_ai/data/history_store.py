@@ -408,12 +408,27 @@ class HistoryStore:
         return dict(row) if row else None
 
     def changes_by_field(
-        self, symbol: str, days: int = 7, as_of: datetime | None = None
+        self,
+        symbol: str,
+        days: int = 7,
+        as_of: datetime | None = None,
+        model_version: str | None = None,
     ) -> dict[str, Any]:
-        """Select the latest non-null historical value independently per field."""
+        """Select the latest non-null historical value independently per field.
+
+        With ``model_version``, only runs scored by that model are compared, so a
+        model change never shows up as a score or rank jump.
+        """
         cutoff = (
             (as_of or datetime.now(timezone.utc)) - timedelta(days=days)
         ).isoformat()
+        version_filter, params = "", (symbol, cutoff)
+        if model_version is not None:
+            version_filter = (
+                "AND run_id IN (SELECT run_id FROM prediction_snapshots "
+                "WHERE symbol=ranking_history.symbol AND model_version=?) "
+            )
+            params = (symbol, cutoff, model_version)
         output = {}
         for field in (
             "long_term_score",
@@ -423,8 +438,8 @@ class HistoryStore:
         ):
             row = self.db.execute(
                 f"SELECT {field} FROM ranking_history WHERE symbol=? AND run_timestamp<=? "
-                f"AND {field} IS NOT NULL ORDER BY run_timestamp DESC LIMIT 1",
-                (symbol, cutoff),
+                f"{version_filter}AND {field} IS NOT NULL ORDER BY run_timestamp DESC LIMIT 1",
+                params,
             ).fetchone()
             output[field] = row[0] if row else None
             output[f"{field}_history_status"] = (

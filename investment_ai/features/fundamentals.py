@@ -225,11 +225,6 @@ def derive_fundamentals(
     return result
 
 
-FLOW_KEYS = (
-    "revenue", "gross_profit", "operating_income", "net_income", "ebit", "ebitda",
-    "interest_expense", "tax_provision", "pretax_income", "operating_cash_flow",
-    "capital_expenditure",
-)
 # Level metrics taken from trailing-twelve-month statements when available.
 TTM_LEVEL_KEYS = (
     "revenue", "gross_profit", "operating_income", "net_income", "ebit", "ebitda",

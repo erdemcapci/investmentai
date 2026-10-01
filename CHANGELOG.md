@@ -12,6 +12,10 @@
 - The action list takes short-term ranked names instead of credible setups only.
 - Backtest strategies now include the production price model and the 3.2.0
   composite for comparison.
+- The 7-day score and rank changes compare only runs scored by the current
+  model, so a model upgrade never appears as a rank jump.
+- Removed unused helpers (legacy constituent utilities, `is_fresh`,
+  `pending_prediction_symbols`, unused constants).
 
 ## 1.2.0 (scoring model 3.2.0)
 
