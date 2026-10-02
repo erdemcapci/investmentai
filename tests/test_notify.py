@@ -130,3 +130,33 @@ def test_failure_message_includes_log_tail(tmp_path):
 ])
 def test_money_formatting(value, currency, expected):
     assert notify._money(value, currency) == expected
+
+
+def test_ranking_tables_show_company_other_rank_and_analyst_target(tmp_path):
+    full = pd.DataFrame(
+        {
+            "symbol": ["AAA", "LONGSYMBOL.CO", "CCC"],
+            "company_name": ["Alpha", "A Very Long Company Name Holdings", "Gamma"],
+            "short_term_rank": [1, 2, np.nan],
+            "long_term_rank": [np.nan, 7, 1],
+            "current_price": [100.0, 50.0, 10.0],
+            "target_mean": [120.0, np.nan, 9.0],
+            "rating_count": [12, 3, np.nan],
+            "trading_currency": ["USD", "DKK", "EUR"],
+        }
+    )
+    table = notify.ranking_table(full, "short_term_rank", "long_term_rank", "LT")
+    lines = table.strip("`").splitlines()
+    assert lines[0].startswith(" # Symbol") and len(lines) == 3  # header + 2 ranked names
+    assert "Alpha" in lines[1] and "$120.00 +20% (12)" in lines[1] and " — " in lines[1]
+    assert "A Very Long Compa…" in lines[2] and lines[2].rstrip().endswith("n/a")
+    # Columns stay aligned even with a long symbol.
+    assert lines[1].index("Alpha") == lines[2].index("A Very")
+    lt = notify.ranking_table(full, "long_term_rank", "short_term_rank", "ST")
+    assert "Gamma" in lt and "€9.00 -10%" in lt
+
+
+def test_daily_message_includes_both_top_lists(tmp_path):
+    _write_run(tmp_path, "20261001T000000Z-a", "2026-09-30T00:00:00+00:00")
+    text = notify.daily_message(tmp_path)
+    assert "Short-term top 20" in text and "Long-term top 20" in text

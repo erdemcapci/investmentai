@@ -183,8 +183,10 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 ```
 
 After each scheduled run, `scripts/daily_run.sh` posts the run status and
-market regime; the top five action-list names, one per sector, with price and
-stop; warnings for missing or nearby earnings dates and very volatile names;
+market regime; the top five action-list names, one per sector, with company,
+price and stop; the short-term top 20 with long-term ranks and the long-term top
+20 with short-term ranks, each with the analysts' average 12-month price target,
+implied move and analyst count; warnings for missing or nearby earnings dates and very volatile names;
 and a reminder to sell the list from ten trading days earlier. A failed run
 posts an alert with the end of its log. Slack problems are logged and never
 fail a run.

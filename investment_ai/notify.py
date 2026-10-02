@@ -20,6 +20,8 @@ from investment_ai.dashboard_data import list_runs, load_run
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 BASKET_SIZE = 5
+TOP_LIST_SIZE = 20
+NAME_WIDTH = 18
 HOLD_SESSIONS = 10
 # Calendar days that cover a 10-session hold plus the entry day.
 HOLDING_WINDOW_DAYS = 16
@@ -78,6 +80,45 @@ def _money(value, currency) -> str:
     symbol = CURRENCY_SYMBOLS.get(str(currency), "")
     suffix = "p" if currency == "GBp" else ""
     return f"{symbol}{value:,.2f}{suffix}" if value < 1000 else f"{symbol}{value:,.0f}{suffix}"
+
+
+def _name(value) -> str:
+    text = "" if pd.isna(value) else str(value).strip()
+    return text if len(text) <= NAME_WIDTH else text[: NAME_WIDTH - 1] + "…"
+
+
+def _rank(value) -> str:
+    return "—" if pd.isna(value) else f"{int(value)}"
+
+
+def _analyst_target(row: pd.Series) -> str:
+    """Average analyst price target with the implied move from today's price."""
+    target = pd.to_numeric(row.get("target_mean"), errors="coerce")
+    price = pd.to_numeric(row.get("current_price"), errors="coerce")
+    if pd.isna(target) or pd.isna(price) or price <= 0:
+        return "n/a"
+    analysts = pd.to_numeric(row.get("rating_count"), errors="coerce")
+    count = f" ({int(analysts)})" if pd.notna(analysts) else ""
+    return f"{_money(target, row.get('trading_currency'))} {(target / price - 1) * 100:+.0f}%{count}"
+
+
+def ranking_table(full: pd.DataFrame, rank: str, other: str, other_label: str,
+                  size: int = TOP_LIST_SIZE) -> str:
+    """Top ``size`` by ``rank`` with the other horizon's rank and analyst target."""
+    if rank not in full:
+        return "_(not available in this run)_"
+    top = full[pd.to_numeric(full[rank], errors="coerce").le(size)].sort_values(rank)
+    width = max([len("Symbol")] + [len(str(symbol)) for symbol in top.symbol]) + 1
+    header = (f"{'#':>2} {'Symbol':<{width}}{'Company':<{NAME_WIDTH + 1}}{other_label:>3}  "
+              f"{'Price':>9}  Analyst avg target")
+    rows = [header]
+    for _, row in top.iterrows():
+        rows.append(
+            f"{_rank(row[rank]):>2} {str(row['symbol']):<{width}}{_name(row.get('company_name')):<{NAME_WIDTH + 1}}"
+            f"{_rank(row.get(other)):>3}  {_money(row.get('current_price'), row.get('trading_currency')):>9}  "
+            f"{_analyst_target(row)}"
+        )
+    return "```" + "\n".join(rows) + "```"
 
 
 def _price_date(full: pd.DataFrame) -> date | None:
@@ -155,13 +196,21 @@ def daily_message(runs_dir: Path) -> str:
                 row = row.iloc[0]
             currency = row.get("trading_currency")
             rows.append(
-                f"{int(item.action_rank):>2}. {item.symbol:<9}{str(item.sector)[:22]:<23}"
-                f"{_money(row.get('current_price'), currency):>11}  stop {_money(row.get('stop_loss_price'), currency)}"
+                f"{int(item.action_rank):>2}. {item.symbol:<9}{_name(row.get('company_name')):<{NAME_WIDTH + 1}}"
+                f"{_money(row.get('current_price'), currency):>9}  stop {_money(row.get('stop_loss_price'), currency)}"
+                f"  ({item.sector})"
             )
             notes += [f"• {item.symbol}: {note}" for note in _warnings(row)]
         lines.append("```" + "\n".join(rows) + "```")
         if notes:
             lines.append("\n".join(notes))
+    lines.append("\n*Short-term top 20* — with long-term rank (LT) and analysts' average "
+                 "12-month price target (number of analysts)")
+    lines.append(ranking_table(full, "short_term_rank", "long_term_rank", "LT"))
+    lines.append("*Long-term top 20* — with short-term rank (ST)")
+    lines.append(ranking_table(full, "long_term_rank", "short_term_rank", "ST"))
+    lines.append("_Analyst targets are consensus context, not a model input: strong short-term "
+                 "names often trade above them after a run-up._")
     due = due_for_sale(runs[1:], as_of) if as_of else None
     if due:
         _, run_date, symbols = due

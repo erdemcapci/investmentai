@@ -22,7 +22,9 @@
 - Run log messages no longer print twice.
 - Added a read-only Streamlit dashboard (`streamlit run dashboard.py`).
 - Slack notifications: daily summary with the top-five basket, warnings and a
-  sell reminder; failed-run alerts (`--notify`, `--notify-test`).
+  sell reminder; short- and long-term top-20 tables with the other horizon's
+  rank and the analysts' average price target; failed-run alerts
+  (`--notify`, `--notify-test`).
 - The earnings announcement reaction ignores a bar stamped today, matching the
   price features, so a run during market hours never scores a half-day price.
 
