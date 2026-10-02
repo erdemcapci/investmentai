@@ -21,6 +21,8 @@
   hit Yahoo rate limits and removed the stale fallback.
 - Run log messages no longer print twice.
 - Added a read-only Streamlit dashboard (`streamlit run dashboard.py`).
+- Slack notifications: daily summary with the top-five basket, warnings and a
+  sell reminder; failed-run alerts (`--notify`, `--notify-test`).
 - The earnings announcement reaction ignores a bar stamped today, matching the
   price features, so a run during market hours never scores a half-day price.
 

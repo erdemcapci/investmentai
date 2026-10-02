@@ -19,6 +19,14 @@ LOG="$LOG_DIR/run-$(date -u +%Y%m%dT%H%M%SZ).log"
 "$ROOT/.venv/bin/python" main.py > "$LOG" 2>&1
 STATUS=$?
 echo "$(date -u +%FT%TZ) exit=$STATUS log=$LOG" >> "$LOG_DIR/daily_run.log"
+
+# Slack: exit 0 (valid/degraded) and 3 (invalid data) produce a run to report;
+# anything else is a failed run.  Notification problems never change STATUS.
+if [ $STATUS -eq 0 ] || [ $STATUS -eq 3 ]; then
+    "$ROOT/.venv/bin/python" main.py --notify >> "$LOG" 2>&1
+else
+    "$ROOT/.venv/bin/python" main.py --notify-failure "$STATUS" "$LOG" >> "$LOG" 2>&1
+fi
 # Keep the last 60 run logs.
 ls -1t "$LOG_DIR"/run-*.log 2>/dev/null | tail -n +61 | xargs rm -f
 exit $STATUS

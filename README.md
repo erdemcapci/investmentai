@@ -170,6 +170,30 @@ scripts/uninstall_daily_run.sh   # removes it
 A run missed while the Mac sleeps starts when it wakes. Logs are written to
 `investment_ai_logs/`, and overlapping runs are skipped.
 
+The project must not live in Desktop, Documents or Downloads: macOS blocks
+launchd jobs from reading those folders, so the scheduled run fails to start.
+
+## Slack notifications
+
+Put a Slack incoming-webhook URL in a git-ignored `.env` file at the project
+root (or the `SLACK_WEBHOOK_URL` environment variable):
+
+```
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+```
+
+After each scheduled run, `scripts/daily_run.sh` posts the run status and
+market regime; the top five action-list names, one per sector, with price and
+stop; warnings for missing or nearby earnings dates and very volatile names;
+and a reminder to sell the list from ten trading days earlier. A failed run
+posts an alert with the end of its log. Slack problems are logged and never
+fail a run.
+
+```bash
+python main.py --notify-test   # test message
+python main.py --notify        # post the latest run's summary now
+```
+
 ## Resume and replay
 
 ```bash

@@ -379,6 +379,22 @@ def _parser() -> argparse.ArgumentParser:
     modes.add_argument("--rescore", metavar="RUN_ID")
     modes.add_argument("--validation-report", action="store_true")
     modes.add_argument(
+        "--notify",
+        action="store_true",
+        help="post the latest run's summary to Slack",
+    )
+    modes.add_argument(
+        "--notify-test",
+        action="store_true",
+        help="post a test message to Slack",
+    )
+    modes.add_argument(
+        "--notify-failure",
+        nargs="+",
+        metavar=("EXIT_CODE", "LOG"),
+        help="post a failed-run alert to Slack",
+    )
+    modes.add_argument(
         "--backtest",
         action="store_true",
         help="walk-forward test of the price-based signals on stored history",
@@ -1228,6 +1244,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(validation_report(store.db), indent=2, default=str))
         store.close()
         return 0
+    if args.notify or args.notify_test or args.notify_failure:
+        from investment_ai import notify
+
+        if args.notify_test:
+            text = "✅ Investment AI test message — Slack connection works."
+        elif args.notify_failure:
+            text = notify.failure_message(*args.notify_failure[:2])
+        else:
+            text = notify.daily_message(RUNS_DIR)
+        sent = notify.post(text)
+        print(text if sent else "Slack post failed or SLACK_WEBHOOK_URL is not set.")
+        return 0 if sent else 1
     if args.backtest:
         from investment_ai.backtest import run_backtest_cli
 
