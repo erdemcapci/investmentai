@@ -951,9 +951,15 @@ def execute(
             for key, item in constituent_sources.items()
             for reason in item["status_reasons"]
         ]
-        health_details["common_run_status_reasons"] = (
-            universe_reasons + health_details["common_run_status_reasons"]
-        )
+        if universe_health_status == "INVALID":
+            health_details["common_run_status_reasons"] = (
+                universe_reasons + health_details["common_run_status_reasons"]
+            )
+        else:
+            # Unmatched or missing constituents only shrink the universe.
+            health_details["coverage_notes"] = (
+                universe_reasons + health_details["coverage_notes"]
+            )
         health = health_details["overall_run_status"]
         reasons = (
             health_details["common_run_status_reasons"]

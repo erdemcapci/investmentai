@@ -19,6 +19,8 @@ LT_COLUMNS = [
     "risk_score",
     "risk_coverage",
     "fundamentals_basis",
+    "data_check_status",
+    "data_check_notes",
     "expectations_direction",
     "overall_data_status",
     "confidence_score",
@@ -67,6 +69,8 @@ ST_COLUMNS = [
     "drawdown_from_20d_high_pct",
     "days_to_next_earnings",
     "earnings_imminent_flag",
+    "data_check_status",
+    "data_check_notes",
     "st_top_positive_driver",
     "st_top_negative_driver",
 ]
@@ -92,6 +96,8 @@ ACTION_COLUMNS = [
     "risk_score",
     "earnings_imminent_flag",
     "days_to_next_earnings",
+    "data_check_status",
+    "data_check_notes",
     "st_top_positive_driver",
     "st_top_negative_driver",
 ]
@@ -113,7 +119,9 @@ INVESTMENT_RANKING_COLUMNS = [
     "short_term_setup",
     "long_term_risk_adjusted_score",
     "short_term_risk_adjusted_score",
-    # Risk, confidence and the short-term trade plan.
+    # Risk, confidence, per-stock data check and the short-term trade plan.
+    "data_check_status",
+    "data_check_notes",
     "risk_score",
     "confidence_score",
     "market_regime",

@@ -142,11 +142,32 @@ analyst component error makes a mixed bundle `PARTIAL` rather than masking it.
 
 ## Data quality and run status
 
-`VALID` requires price >=97%, quality >=70%, valuation >=70%, and expectations >=75%.
-`DEGRADED` requires at least 90%, 55%, 55%, and 60%, respectively. Anything below a
-floor, or an invalid combined universe, is `INVALID`; Top 100 tables are suppressed and
-the process exits 3. The manifest also contains contract counts, dependency versions,
-timings, cache ratios, score distributions, and benchmark health.
+The run status reports only problems that can mislead a decision:
+
+- `INVALID`: the combined universe is invalid, or a coverage measure falls below
+  its floor (price 90%; quality, growth and valuation 55%; expectations 60%).
+  This catches broad provider outages. Top tables are suppressed and the process
+  exits 3.
+- `DEGRADED`: fewer than 97% of prices are current.
+- `VALID`: otherwise.
+
+Coverage that is only below target (unmatched tickers, fewer stocks with analyst
+data) means fewer stocks are ranked, not that ranked stocks are wrong. It is
+recorded as `coverage_notes` in the manifest and does not change the status.
+
+Each stock carries its own data check (`data_check_status`, `data_check_notes`):
+
+- `INCOMPLETE`: the price is not current, or there is no stop level. Excluded
+  from the action list.
+- `CHECK`: verify the noted item first, e.g. a missing or nearby earnings date,
+  analyst data not refreshed today, a missing EPS estimate trend, fundamentals
+  not refreshed, or an unknown market trend.
+- `OK`: nothing material missing.
+
+Gaps shared by every stock (history still accumulating, quiet weeks without
+upgrades) and inputs the model scores as neutral are not flagged. The manifest
+also contains contract counts, dependency versions, timings, cache ratios,
+score distributions, and benchmark health.
 
 ## Cache and history
 

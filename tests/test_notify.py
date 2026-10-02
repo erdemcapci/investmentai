@@ -6,9 +6,10 @@ import pytest
 import requests
 
 from investment_ai import notify
+from investment_ai.scoring.data_check import stock_data_check
 
 
-def _write_run(root, run_id, price_as_of, status="DEGRADED", sectors=None, regime="RISK_ON"):
+def _write_run(root, run_id, price_as_of, status="VALID", sectors=None, regime="RISK_ON"):
     directory = root / run_id
     directory.mkdir(parents=True)
     sectors = sectors or ["Tech", "Tech", "Energy", "Health", "Banks", "Retail", "Utilities"]
@@ -24,12 +25,18 @@ def _write_run(root, run_id, price_as_of, status="DEGRADED", sectors=None, regim
             "stop_loss_price": 90.0,
             "stop_loss_pct": [25.0] + [10.0] * (len(sectors) - 1),
             "days_to_next_earnings": [40, 40, 5, np.nan] + [40] * (len(sectors) - 4),
+            "short_term_rank": range(1, len(sectors) + 1),
+            "long_term_rank": range(1, len(sectors) + 1),
+            "price_data_status": "FRESH",
+            "eps_short_horizon_momentum_score": 60.0,
         }
     )
+    checks = pd.DataFrame([stock_data_check(row) for row in full.to_dict("records")])
+    full = pd.concat([full, checks], axis=1)
     full.to_csv(directory / "full_analysis.csv", index=False)
     full.assign(action_rank=range(1, len(sectors) + 1)).to_csv(directory / "action_list.csv", index=False)
     (directory / "run_manifest.json").write_text(
-        json.dumps({"overall_run_status": status, "run_status_reasons": ["coverage note"]})
+        json.dumps({"overall_run_status": status, "run_status_reasons": [], "coverage_notes": ["coverage note"]})
     )
 
 
@@ -86,11 +93,13 @@ def test_basket_takes_one_stock_per_sector_in_rank_order():
 def test_daily_message_contents_and_warnings(tmp_path):
     _write_run(tmp_path, "20261001T000000Z-a", "2026-09-30T00:00:00+00:00")
     text = notify.daily_message(tmp_path)
-    assert "⚠️ DEGRADED" in text and "Top 5" in text
-    assert "S1" not in text  # second Tech name is skipped
+    assert "✅ data OK" in text and "Top 5" in text and "Check before buying" in text
+    basket = text.split("*Top 5*")[1].split("Short-term top 20")[0]
+    assert " S1 " not in basket  # second Tech name is skipped in the basket
     assert "S0: very volatile" in text
-    assert "S2: reports earnings in ~5 days" in text
-    assert "S3: no earnings date" in text
+    assert "S2: earnings in ~5 days" in text
+    assert "S3: no next earnings date" in text
+    assert "Coverage notes" not in text
     assert "not fully risk-on" not in text  # risk-on market keeps full size
 
 
@@ -160,3 +169,12 @@ def test_daily_message_includes_both_top_lists(tmp_path):
     _write_run(tmp_path, "20261001T000000Z-a", "2026-09-30T00:00:00+00:00")
     text = notify.daily_message(tmp_path)
     assert "Short-term top 20" in text and "Long-term top 20" in text
+
+
+def test_degraded_message_explains_outdated_prices(tmp_path):
+    _write_run(tmp_path, "20261001T000000Z-a", "2026-09-30T00:00:00+00:00", status="DEGRADED")
+    manifest = tmp_path / "20261001T000000Z-a" / "run_manifest.json"
+    manifest.write_text(json.dumps({"overall_run_status": "DEGRADED", "coverage_notes": [],
+                                    "run_status_reasons": ["price_fresh_coverage_pct=93.0% is below 97%"]}))
+    text = notify.daily_message(tmp_path)
+    assert "Prices are outdated for part of the market" in text and "93.0%" in text

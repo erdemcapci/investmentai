@@ -49,6 +49,7 @@ SCORING_CODE_PATHS = (
     "investment_ai/scoring/short_term.py",
     "investment_ai/scoring/ranking.py",
     "investment_ai/scoring/action.py",
+    "investment_ai/scoring/data_check.py",
     "investment_ai/features/benchmark.py",
     "investment_ai/features/analyst.py",
     "investment_ai/features/fundamentals.py",
@@ -175,37 +176,46 @@ def run_status(
 def horizon_run_statuses(
     metrics: dict[str, Any], universe_valid: bool | str = True
 ) -> dict[str, Any]:
-    """Evaluate shared, long-term and short-term input readiness independently."""
+    """Evaluate shared, long-term and short-term input readiness independently.
 
-    def evaluate(spec: dict[str, tuple[float, float]]) -> tuple[str, list[str]]:
+    Only problems that can mislead a decision change the status: a broken
+    universe or coverage collapsing below a floor (``INVALID``), or prices
+    going stale across the market (``DEGRADED``).  Coverage that is merely
+    below target (fewer stocks with analyst data, unmatched tickers) means
+    fewer stocks get ranked; it is reported in ``coverage_notes`` and in each
+    stock's own data check instead of degrading the whole run.
+    """
+
+    def evaluate(
+        spec: dict[str, tuple[float, float]], degrading: set[str] = frozenset()
+    ) -> tuple[str, list[str], list[str]]:
         invalid = [
             f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {floor}%"
             for k, (_, floor) in spec.items()
             if float(metrics.get(k, 0) or 0) < floor
         ]
         if invalid:
-            return "INVALID", invalid
-        degraded = [
-            f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {target}%"
+            return "INVALID", invalid, []
+        below_target = [
+            (k, f"{k}={float(metrics.get(k, 0) or 0):.1f}% is below {target}%")
             for k, (target, _) in spec.items()
             if float(metrics.get(k, 0) or 0) < target
         ]
-        return ("DEGRADED", degraded) if degraded else ("VALID", [])
+        degraded = [text for key, text in below_target if key in degrading]
+        notes = [text for key, text in below_target if key not in degrading]
+        return ("DEGRADED" if degraded else "VALID"), degraded, notes
 
+    price = {"price_fresh_coverage_pct": (PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT)}
     universe_status = (
         universe_valid if isinstance(universe_valid, str) else "VALID" if universe_valid else "INVALID"
     )
-    common = (
-        ("INVALID", ["combined universe validation failed"])
-        if universe_status == "INVALID"
-        else evaluate(
-            {
-                "price_fresh_coverage_pct": (PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT),
-            }
-        )
-    )
-    if universe_status == "DEGRADED" and common[0] == "VALID":
-        common = ("DEGRADED", ["constituent universe health degraded"])
+    notes: list[str] = []
+    if universe_status == "INVALID":
+        common = ("INVALID", ["combined universe validation failed"], [])
+    else:
+        common = evaluate(price, set(price))
+        if universe_status == "DEGRADED":
+            notes.append("constituent universe health degraded")
     lt = evaluate(
         {
             "quality_coverage_pct": (70, 55),
@@ -217,15 +227,16 @@ def horizon_run_statuses(
     )
     st = evaluate(
         {
-            "price_fresh_coverage_pct": (PRICE_FRESH_VALID_PCT, PRICE_FRESH_INVALID_PCT),
+            **price,
             "short_expectations_coverage_pct": (75, 60),
             "short_rs_coverage_pct": (75, 60),
             "setup_data_coverage_pct": (75, 60),
             "technical_data_coverage_pct": (75, 60),
-        }
+        },
+        set(price),
     )
     if common[0] == "INVALID":
-        lt = st = ("INVALID", common[1])
+        lt = st = ("INVALID", common[1], [])
     if common[0] == "INVALID" or (lt[0] == "INVALID" and st[0] == "INVALID"):
         overall = "INVALID"
     elif (lt[0] == "INVALID") != (st[0] == "INVALID"):
@@ -234,6 +245,7 @@ def horizon_run_statuses(
         overall = "DEGRADED"
     else:
         overall = "VALID"
+    notes += [note for note in common[2] + lt[2] + st[2] if note not in notes]
     return {
         "common_run_status": common[0],
         "lt_run_status": lt[0],
@@ -242,6 +254,7 @@ def horizon_run_statuses(
         "common_run_status_reasons": common[1],
         "lt_run_status_reasons": lt[1],
         "st_run_status_reasons": st[1],
+        "coverage_notes": notes,
     }
 
 

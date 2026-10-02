@@ -95,3 +95,35 @@ def test_price_history_reads_read_only_with_moving_averages(tmp_path):
     assert history.ma_50.iloc[-1] == pytest.approx(np.mean(range(11, 61)))
     assert history.ma_200.isna().all()
     assert price_history(tmp_path / "missing.sqlite", "A").empty
+
+
+def test_old_manifest_is_re_evaluated_under_current_rules():
+    from investment_ai.dashboard_data import effective_status
+
+    old = {
+        "overall_run_status": "DEGRADED",
+        "run_status_reasons": ["lt_score_coverage_pct=65.3% is below 75%"],
+        "price_fresh_coverage_pct": 100, "quality_coverage_pct": 96, "growth_coverage_pct": 96,
+        "valuation_coverage_pct": 92, "long_expectations_coverage_pct": 71.5,
+        "lt_score_coverage_pct": 65.3, "short_expectations_coverage_pct": 72.2,
+        "short_rs_coverage_pct": 99, "setup_data_coverage_pct": 99, "technical_data_coverage_pct": 99,
+        "constituent_sources": {"stoxx600": {"source_status": "DEGRADED"}},
+    }
+    health = effective_status(old)
+    assert health["status"] == "VALID" and health["reasons"] == []
+    assert "constituent universe health degraded" in health["notes"]
+    new = {"overall_run_status": "DEGRADED", "run_status_reasons": ["x"], "coverage_notes": []}
+    assert effective_status(new)["status"] == "DEGRADED"
+
+
+def test_load_run_adds_data_check_to_old_runs(tmp_path):
+    from investment_ai.dashboard_data import load_run
+
+    pd.DataFrame(
+        {"symbol": ["A"], "current_price": [10.0], "price_data_status": ["STALE"],
+         "short_term_rank": [1], "stop_loss_price": [9.0]}
+    ).to_csv(tmp_path / "full_analysis.csv", index=False)
+    pd.DataFrame({"symbol": ["A"], "action_rank": [1]}).to_csv(tmp_path / "action_list.csv", index=False)
+    full, action = load_run(tmp_path)
+    assert full.data_check_status.iloc[0] == "INCOMPLETE"
+    assert action.data_check_status.iloc[0] == "INCOMPLETE"

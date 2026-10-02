@@ -13,7 +13,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from investment_ai.runtime import horizon_run_statuses
 from investment_ai.scoring.common import NEUTRAL, weighted
+from investment_ai.scoring.data_check import stock_data_check
 
 # Pillar columns a viewer can re-weight, with the production weights.
 SHORT_TERM_PILLARS = {
@@ -52,11 +54,49 @@ def list_runs(runs_dir: Path) -> list[dict]:
 
 
 def load_run(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Full analysis and the exported action list (empty when absent)."""
+    """Full analysis and the exported action list (empty when absent).
+
+    Runs saved before the per-stock data check get it computed on load; it
+    depends only on columns the run already stored.
+    """
     full = pd.read_csv(path / "full_analysis.csv", low_memory=False)
     action_path = path / "action_list.csv"
     action = pd.read_csv(action_path) if action_path.exists() else pd.DataFrame()
+    if "data_check_status" not in full:
+        checks = pd.DataFrame(
+            [stock_data_check(row) for row in full.to_dict("records")], index=full.index
+        )
+        full = pd.concat([full, checks], axis=1)
+    if len(action) and "data_check_status" not in action and "symbol" in action:
+        lookup = full.drop_duplicates("symbol").set_index("symbol")
+        for column in ("data_check_status", "data_check_notes"):
+            action[column] = action.symbol.map(lookup[column])
     return full, action
+
+
+def effective_status(manifest: dict) -> dict:
+    """Run status under the current rules.
+
+    Manifests written before coverage notes existed are re-evaluated from the
+    coverage metrics they stored, so an old run is not shown as degraded for
+    reasons that no longer degrade a run.
+    """
+    if "coverage_notes" in manifest or "overall_run_status" not in manifest:
+        return {
+            "status": manifest.get("overall_run_status", "UNKNOWN"),
+            "reasons": manifest.get("run_status_reasons", []),
+            "notes": manifest.get("coverage_notes", []),
+        }
+    sources = manifest.get("constituent_sources") or {}
+    universe = (
+        "INVALID" if any(item.get("source_status") == "INVALID" for item in sources.values())
+        else "DEGRADED" if any(item.get("source_status") == "DEGRADED" for item in sources.values())
+        else "VALID"
+    )
+    health = horizon_run_statuses(manifest, universe_valid=universe)
+    reasons = (health["common_run_status_reasons"] + health["lt_run_status_reasons"]
+               + health["st_run_status_reasons"])
+    return {"status": health["overall_run_status"], "reasons": reasons, "notes": health["coverage_notes"]}
 
 
 def rerank(

@@ -21,6 +21,12 @@
   hit Yahoo rate limits and removed the stale fallback.
 - Run log messages no longer print twice.
 - Added a read-only Streamlit dashboard (`streamlit run dashboard.py`).
+- Run status now changes only for decision-relevant problems (invalid
+  universe, coverage below its floor, or prices not current); coverage below
+  target is recorded as `coverage_notes`. Older runs are re-evaluated when
+  shown.
+- Per-stock data check (`OK` / `CHECK` / `INCOMPLETE`) in the outputs,
+  dashboard and Slack; `INCOMPLETE` stocks are kept out of the action list.
 - Slack notifications: daily summary with the top-five basket, warnings and a
   sell reminder; short- and long-term top-20 tables with the other horizon's
   rank and the analysts' average price target; failed-run alerts

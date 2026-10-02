@@ -16,15 +16,13 @@ import numpy as np
 import pandas as pd
 import requests
 
-from investment_ai.dashboard_data import list_runs, load_run
+from investment_ai.dashboard_data import effective_status, list_runs, load_run
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 BASKET_SIZE = 5
 TOP_LIST_SIZE = 20
 NAME_WIDTH = 18
 HOLD_SESSIONS = 10
-# Calendar days that cover a 10-session hold plus the entry day.
-HOLDING_WINDOW_DAYS = 16
 VOLATILE_STOP_PCT = 24.9
 CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "GBp": "", "CHF": "CHF ", "PLN": "zł ",
                     "DKK": "kr ", "SEK": "kr ", "NOK": "kr "}
@@ -116,9 +114,14 @@ def ranking_table(full: pd.DataFrame, rank: str, other: str, other_label: str,
         rows.append(
             f"{_rank(row[rank]):>2} {str(row['symbol']):<{width}}{_name(row.get('company_name')):<{NAME_WIDTH + 1}}"
             f"{_rank(row.get(other)):>3}  {_money(row.get('current_price'), row.get('trading_currency')):>9}  "
-            f"{_analyst_target(row)}"
+            f"{_analyst_target(row)}{_flag(row)}"
         )
     return "```" + "\n".join(rows) + "```"
+
+
+def _flag(row: pd.Series) -> str:
+    status = row.get("data_check_status")
+    return "  ⚠" if status == "CHECK" else "  ✖" if status == "INCOMPLETE" else ""
 
 
 def _price_date(full: pd.DataFrame) -> date | None:
@@ -127,12 +130,8 @@ def _price_date(full: pd.DataFrame) -> date | None:
 
 
 def _warnings(row: pd.Series) -> list[str]:
-    notes = []
-    days = pd.to_numeric(row.get("days_to_next_earnings"), errors="coerce")
-    if pd.isna(days):
-        notes.append("no earnings date in data — check before buying")
-    elif days <= HOLDING_WINDOW_DAYS:
-        notes.append(f"reports earnings in ~{days:.0f} days, inside the hold")
+    """The stock's own data-check notes plus a volatility caution."""
+    notes = [note for note in str(row.get("data_check_notes") or "").split("; ") if note and note != "nan"]
     stop = pd.to_numeric(row.get("stop_loss_pct"), errors="coerce")
     if pd.notna(stop) and stop >= VOLATILE_STOP_PCT:
         notes.append("very volatile (stop at the 25% cap) — consider half size")
@@ -167,14 +166,19 @@ def daily_message(runs_dir: Path) -> str:
     latest = runs[0]
     full, action = load_run(latest["path"])
     manifest = latest["manifest"]
-    status = manifest.get("overall_run_status", "UNKNOWN")
+    health = effective_status(manifest)
+    status = health["status"]
     as_of = _price_date(full)
     regimes = full.get("market_regime", pd.Series(dtype=object)).value_counts().to_dict()
     regime_text = ", ".join(f"{name} ({count})" for name, count in regimes.items()) or "unknown"
+    status_text = "data OK" if status == "VALID" else status
     lines = [
         f"📈 *Investment AI* — prices as of {as_of or 'unknown'} · "
-        f"{STATUS_ICONS.get(status, '❔')} {status} · market {regime_text}",
+        f"{STATUS_ICONS.get(status, '❔')} {status_text} · market {regime_text}",
     ]
+    if status == "DEGRADED":
+        reasons = health["reasons"]
+        lines.append("⚠️ Prices are outdated for part of the market: " + "; ".join(reasons[:2]))
     if status == "INVALID":
         lines.append("⛔ Data quality is too low today — *no new trades*. "
                      "Check run_manifest.json for the reasons.")
@@ -201,6 +205,8 @@ def daily_message(runs_dir: Path) -> str:
                 f"  ({item.sector})"
             )
             notes += [f"• {item.symbol}: {note}" for note in _warnings(row)]
+        if notes:
+            notes.insert(0, "*Check before buying:*")
         lines.append("```" + "\n".join(rows) + "```")
         if notes:
             lines.append("\n".join(notes))
@@ -209,15 +215,12 @@ def daily_message(runs_dir: Path) -> str:
     lines.append(ranking_table(full, "short_term_rank", "long_term_rank", "LT"))
     lines.append("*Long-term top 20* — with short-term rank (ST)")
     lines.append(ranking_table(full, "long_term_rank", "short_term_rank", "ST"))
-    lines.append("_Analyst targets are consensus context, not a model input: strong short-term "
-                 "names often trade above them after a run-up._")
+    lines.append("_⚠ = check the stock's data first, ✖ = data incomplete (not in the action list). "
+                 "Analyst targets are context, not a model input._")
     due = due_for_sale(runs[1:], as_of) if as_of else None
     if due:
         _, run_date, symbols = due
         lines.append(f"🔔 *Sell today* if you bought the {run_date:%d %b} list: {', '.join(symbols)}")
-    reasons = manifest.get("run_status_reasons") or []
-    if status == "DEGRADED" and reasons:
-        lines.append("_Coverage notes: " + "; ".join(reasons[:2]) + "_")
     lines.append(f"_Full list: {len(action)} names in action_list.csv · dashboard: "
                  "streamlit run dashboard.py · research only, not advice_")
     return "\n".join(lines)

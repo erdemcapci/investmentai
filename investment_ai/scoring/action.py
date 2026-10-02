@@ -98,7 +98,9 @@ def build_action_list(frame: pd.DataFrame) -> pd.DataFrame:
     lt_count = int(lt_rank.notna().sum())
     if not lt_count or not st_rank.notna().any():
         return frame.iloc[0:0].assign(action_rank=pd.Series(dtype=float))
-    eligible = frame[st_rank.notna() & lt_rank.le(lt_count / 2)].copy()
+    # A stock whose price or stop cannot be trusted is never actionable.
+    usable = frame.get("data_check_status", pd.Series("", index=frame.index)).ne("INCOMPLETE")
+    eligible = frame[st_rank.notna() & lt_rank.le(lt_count / 2) & usable].copy()
     key = (
         "short_term_risk_adjusted_score"
         if "short_term_risk_adjusted_score" in eligible

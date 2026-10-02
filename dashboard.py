@@ -14,6 +14,7 @@ import streamlit as st
 from investment_ai.config import BACKTEST_DIR, HISTORY_DB, RUNS_DIR
 from investment_ai.dashboard_data import (
     LONG_TERM_PILLARS,
+    effective_status,
     SHORT_TERM_PILLARS,
     apply_filters,
     best_in_both,
@@ -88,6 +89,10 @@ COMMON_CONFIG = {
     "momentum_12_1_pct": st.column_config.NumberColumn("12-1m return", format="%.1f%%"),
     "return_20d_pct": st.column_config.NumberColumn("20d return", format="%.1f%%"),
     "days_to_next_earnings": st.column_config.NumberColumn("Days to earnings", format="%.0f"),
+    "data_check_status": st.column_config.TextColumn(
+        "Data", width="small",
+        help="OK = complete · CHECK = verify the noted item · INCOMPLETE = outdated price or no stop"),
+    "data_check_notes": st.column_config.TextColumn("What to check", width="medium"),
     "custom_score": score_column("Your score"),
     "custom_rank": st.column_config.NumberColumn("Your rank", format="%d"),
     "st_positive_drivers": st.column_config.TextColumn("Why (short term)", width="large"),
@@ -120,7 +125,7 @@ with st.sidebar:
         st.rerun()
     labels = {
         run["run_id"]: f"{run['run_id'][:8]} {run['run_id'][9:13]}Z · "
-        f"{run['manifest'].get('overall_run_status', '?')} · "
+        f"{effective_status(run['manifest'])['status']} · "
         f"model {run['manifest'].get('scoring_model_version', '?')}"
         for run in runs
     }
@@ -131,11 +136,17 @@ with st.sidebar:
     manifest = run["manifest"]
     full, action = _load(run["path"])
 
-    status = manifest.get("overall_run_status", "UNKNOWN")
+    health = effective_status(manifest)
+    status = health["status"]
     _, icon = STATUS.get(status, ("warning", "❔"))
-    st.markdown(f"**Run status:** {icon} {status}")
-    for reason in manifest.get("run_status_reasons", [])[:5]:
+    st.markdown(f"**Run status:** {icon} {'data OK' if status == 'VALID' else status}")
+    for reason in health["reasons"][:5]:
         st.caption(f"• {reason}")
+    notes = health["notes"]
+    if notes:
+        with st.expander("Coverage notes (fewer stocks ranked — no action needed)"):
+            for note in notes:
+                st.caption(f"• {note}")
     regimes = manifest.get("market_regime_counts") or {}
     if regimes:
         st.markdown("**Market regime:** " + ", ".join(f"{k} ({v})" for k, v in regimes.items()))
@@ -167,7 +178,7 @@ cols[4].metric("Model", str(manifest.get("scoring_model_version", "?")))
 if status == "INVALID":
     st.error("This run is INVALID — rankings are diagnostic only.")
 elif status == "DEGRADED":
-    st.warning("This run is DEGRADED — some data coverage is below target. See the sidebar for reasons.")
+    st.warning("Prices are outdated for part of the market — see the sidebar. Check each stock's Data column.")
 
 tabs = st.tabs(
     ["Recommendations", "Explore", "Stock detail", "Sectors", "Play with weights", "Model evidence"]
@@ -184,9 +195,9 @@ with tabs[0]:
     if len(action_view):
         show_table(
             action_view,
-            ["action_rank", "symbol", "company_name", "sector", "current_price",
+            ["action_rank", "symbol", "company_name", "sector", "data_check_status", "current_price",
              "stop_loss_price", "target_price", "stop_loss_pct", "portfolio_weight_pct",
-             "short_term_risk_adjusted_score", "long_term_rank", "st_top_positive_driver"],
+             "short_term_risk_adjusted_score", "long_term_rank", "data_check_notes"],
         )
         chart_data = action_view.assign(
             stop_gap=lambda d: (d.stop_loss_price / d.current_price - 1) * 100,
@@ -219,13 +230,13 @@ with tabs[0]:
     with left:
         st.subheader("Best long-term holdings")
         top_lt = view[view.long_term_rank.notna()].sort_values("long_term_rank").head(15)
-        show_table(top_lt, ["long_term_rank", "symbol", "company_name", "sector",
+        show_table(top_lt, ["long_term_rank", "symbol", "company_name", "sector", "data_check_status",
                             "long_term_risk_adjusted_score", "risk_score", "lt_positive_drivers"])
     with right:
         st.subheader("Strong on both horizons")
         st.caption("Top quarter of both the long-term and short-term rankings.")
         both = best_in_both(view).head(15)
-        show_table(both, ["symbol", "company_name", "sector", "long_term_rank",
+        show_table(both, ["symbol", "company_name", "sector", "data_check_status", "long_term_rank",
                           "short_term_rank", "long_term_score", "short_term_score"])
 
 # ----------------------------------------------------------------------- explore
@@ -263,8 +274,9 @@ with tabs[1]:
     default_columns = ["symbol", "company_name", "sector", "index_name", "current_price",
                        "long_term_rank", "long_term_score", "short_term_rank", "short_term_score",
                        "risk_score", "confidence_score", "momentum_12_1_pct", "target_upside_pct",
-                       "short_term_setup", "days_to_next_earnings"]
-    chosen = st.multiselect("Columns", sorted(full.columns), default=default_columns)
+                       "short_term_setup", "days_to_next_earnings", "data_check_status"]
+    chosen = st.multiselect("Columns", sorted(full.columns),
+                            default=[column for column in default_columns if column in full])
     sort_by = st.selectbox("Sort by", ["long_term_rank", "short_term_rank", "long_term_score",
                                         "short_term_score", "risk_score", "momentum_12_1_pct"])
     ascending = sort_by.endswith("rank") or sort_by == "risk_score"
@@ -291,6 +303,14 @@ with tabs[2]:
     def fmt(value, pattern="{:.1f}"):
         return "—" if pd.isna(value) else pattern.format(value)
 
+    check_status = row.get("data_check_status")
+    check_notes = row.get("data_check_notes")
+    if check_status == "INCOMPLETE":
+        st.error(f"Data incomplete — not actionable: {check_notes}")
+    elif check_status == "CHECK":
+        st.warning(f"Check before acting: {check_notes}")
+    elif check_status == "OK":
+        st.success("Data check: nothing material missing for this stock.")
     metrics = st.columns(6)
     metrics[0].metric("Price", fmt(row.get("current_price"), "{:,.2f}"))
     metrics[1].metric("LT rank", fmt(row.get("long_term_rank"), "{:.0f}"), help="Out of all long-term ranked")
