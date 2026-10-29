@@ -270,6 +270,7 @@ LT_DRIVER_SPECS = (
     ("Financial safety", "Financial Safety", "financial_safety_score", 0.05),
 )
 ST_DRIVER_SPECS = (
+    ("Quality dip", "Quality Dip", "quality_dip_score", SHORT_TERM_WEIGHTS["quality_dip"]),
     ("Relative strength", "Relative Strength", "short_rs_score", SHORT_TERM_WEIGHTS["momentum"]),
     ("Short expectations", "Short Expectations", "expectations_short_score", SHORT_TERM_WEIGHTS["expectations"]),
     ("Earnings drift", "Earnings Drift", "earnings_drift_score", SHORT_TERM_WEIGHTS["earnings_drift"]),
