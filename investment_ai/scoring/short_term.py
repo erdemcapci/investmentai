@@ -23,12 +23,73 @@ CREDIBLE_SETUPS = {"PULLBACK", "BREAKOUT", "MOMENTUM_CONTINUATION", "MIXED"}
 # carry no weight.  Expectations and short interest cannot be replayed and keep
 # literature-based weights; earnings drift (IC t = 2.0) is kept small because a
 # larger share diluted momentum.
+#
+# Model 3.4.0 deliberately departs from the pure-momentum list: it kept
+# ranking stocks that had already run up and then gave the gains back.  The
+# short-term score now favours *strong* names (analyst expectations plus 12-1
+# month trend) that have recently *fallen* -- the deeper the short/mid-term
+# decline, the higher the dip score -- so a pullback in a good stock reads as
+# a buying opportunity, while stocks that just spiked are marked down.
 SHORT_TERM_WEIGHTS = {
-    "momentum": 0.65,
-    "expectations": 0.20,
+    "quality_dip": 0.40,
+    "expectations": 0.30,
+    "momentum": 0.15,
     "earnings_drift": 0.10,
     "positioning": 0.05,
 }
+
+
+def strength_score(row: dict) -> float:
+    """How strong the stock is independent of its recent move (0-100)."""
+    return weighted(
+        {
+            "expectations": row.get("expectations_short_score"),
+            "mom_12_1": model_rs(row, "mom_12_1"),
+            "mom_6_1": model_rs(row, "mom_6_1"),
+        },
+        {"expectations": 0.55, "mom_12_1": 0.30, "mom_6_1": 0.15},
+        0.50,
+    )[0]
+
+
+def dip_depth_score(row: dict) -> float:
+    """Reward the size of the recent fall; penalise recent run-ups.
+
+    Declines beyond ~35% off the 60-day high taper off because they look more
+    like broken stories than dips.
+    """
+    return weighted(
+        {
+            "drawdown_60d": curve(
+                row.get("drawdown_from_60d_high_pct"),
+                [(0, 15), (-5, 40), (-12, 75), (-20, 95), (-35, 75), (-50, 35)],
+            ),
+            "return_20d": curve(
+                row.get("return_20d_pct"),
+                [(-20, 100), (-8, 85), (0, 50), (10, 25), (25, 5)],
+            ),
+            "return_60d": curve(
+                row.get("return_60d_pct"),
+                [(-30, 100), (-12, 85), (0, 50), (20, 25), (50, 5)],
+            ),
+        },
+        {"drawdown_60d": 0.40, "return_20d": 0.30, "return_60d": 0.30},
+        0.60,
+    )[0]
+
+
+def quality_dip_pillar(row: dict) -> tuple[float, float, float]:
+    """Dip depth, credited in proportion to the stock's underlying strength.
+
+    A weak stock that is falling is not a bargain, so its dip earns no credit
+    (neutral); a strong stock that is extended scores below neutral.
+    Returns (pillar, dip depth, strength).
+    """
+    dip, strength = dip_depth_score(row), strength_score(row)
+    if pd.isna(dip) or pd.isna(strength):
+        return np.nan, dip, strength
+    trust = float(np.clip((strength - 40) / 30, 0, 1))
+    return float(NEUTRAL + (dip - NEUTRAL) * trust), dip, strength
 
 
 def momentum_pillar(row: dict) -> tuple[float, float]:
@@ -97,7 +158,9 @@ def score_short_term(row: dict) -> dict:
     )
     drift = row.get("earnings_drift_score", np.nan)
     positioning = positioning_pillar(row)
+    quality_dip, dip_depth, strength = quality_dip_pillar(row)
     pillars = {
+        "quality_dip": quality_dip,
         "momentum": relative_strength,
         "expectations": row.get("expectations_short_score"),
         "earnings_drift": drift,
@@ -107,7 +170,7 @@ def score_short_term(row: dict) -> dict:
     if row.get("market_regime") == REBOUND_RISK:
         # Momentum crashes cluster in sharp rebounds after market declines.
         weights["momentum"] /= 2
-    score, coverage, status = weighted(pillars, weights, 0.60, neutral_fill=NEUTRAL)
+    score, coverage, status = weighted(pillars, weights, 0.40, neutral_fill=NEUTRAL)
     core_ok = (
         pd.notna(relative_strength)
         and pd.notna(row.get("expectations_short_score"))
@@ -119,6 +182,9 @@ def score_short_term(row: dict) -> dict:
         score, status = np.nan, INSUFFICIENT_DATA
     return {
         **setup,
+        "quality_dip_score": quality_dip,
+        "dip_depth_score": dip_depth,
+        "underlying_strength_score": strength,
         "short_rs_score": relative_strength,
         "short_rs_coverage": rs_coverage,
         "volume_confirmation_score": volume,
