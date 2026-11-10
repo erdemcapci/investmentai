@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-APPLICATION_VERSION = "1.3.0"
-SCORING_MODEL_VERSION = "3.3.0"
+APPLICATION_VERSION = "1.4.0"
+SCORING_MODEL_VERSION = "3.4.0"
 DATABASE_SCHEMA_VERSION = 5
 CACHE_SCHEMA_VERSION = 4
 OUTPUT_SCHEMA_VERSION = 1
@@ -50,6 +50,13 @@ RISK_PENALTY_PER_POINT = float(os.getenv("RISK_PENALTY_PER_POINT", "0.20"))
 # Short-term points deducted when earnings are due within this many days.
 EARNINGS_IMMINENT_DAYS = float(os.getenv("EARNINGS_IMMINENT_DAYS", "2"))
 EARNINGS_IMMINENT_PENALTY = float(os.getenv("EARNINGS_IMMINENT_PENALTY", "5"))
+# Short-term pullback bonus: one point per % below the 20-day high, capped, for
+# strong stocks (momentum pillar at or above the floor) above their 200-day average.
+PULLBACK_BONUS_MIN_MOMENTUM = float(os.getenv("PULLBACK_BONUS_MIN_MOMENTUM", "70"))
+PULLBACK_BONUS_CAP = float(os.getenv("PULLBACK_BONUS_CAP", "15"))
+# No bonus beyond this fall from the 20-day high: deeper drops had no reliable
+# rebound and fell another 15% far more often.
+PULLBACK_BONUS_MAX_DRAWDOWN_PCT = float(os.getenv("PULLBACK_BONUS_MAX_DRAWDOWN_PCT", "20"))
 # Trade plan: portfolio fraction risked per short-term idea and the cap per name.
 TRADE_RISK_BUDGET_PCT = float(os.getenv("TRADE_RISK_BUDGET_PCT", "1.0"))
 MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "10.0"))
@@ -74,6 +81,8 @@ def validate_config() -> None:
         errors.append("TTL values must be >= 0")
     if RS_BASIS not in {"benchmark", "raw"}:
         errors.append("RS_BASIS must be 'benchmark' or 'raw'")
+    if PULLBACK_BONUS_CAP < 0:
+        errors.append("PULLBACK_BONUS_CAP must be >= 0")
     if RISK_PENALTY_PER_POINT < 0:
         errors.append("RISK_PENALTY_PER_POINT must be >= 0")
     if not 0 < TRADE_RISK_BUDGET_PCT <= MAX_POSITION_PCT <= 100:

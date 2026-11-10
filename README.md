@@ -90,7 +90,7 @@ non-core pillar counts as neutral (50) instead of re-weighting the rest.
 
 ## Short-term methodology
 
-Model 3.3.0 weights follow the 5-year walk-forward backtest (see Backtest):
+Model 3.4.0 weights follow the 5-year walk-forward backtest (see Backtest):
 Relative Strength 65%, Short-Term Expectations 20%, Earnings Drift 10%, and
 Short Interest 5%. Ranking needs Relative Strength and Short-Term Expectations.
 
@@ -119,6 +119,23 @@ within sector; `benchmark` ranks excess return over the assigned regional index.
 Ranks sort by a risk-adjusted score: `score - 0.20 x max(risk - 50, 0)`, minus 5
 short-term points when earnings are due within 2 days. Raw scores remain
 exported.
+
+The short-term score also gets a pullback bonus (`pullback_bonus_points`): 0.75
+points per % below the 20-day high, up to 11.25, for strong stocks (momentum pillar
+70+) that are still above their 200-day average and less than 20% below the
+high. A strong stock that has eased off its high in an intact uptrend recovered
+more on average than one at its high. A stock below its 200-day average, or 20%+
+off its high, gets nothing: there the fall is a broken trend or a crash, the
+rebound was unreliable in the backtest, and another 15% fall within two weeks was
+two to four times as common. (The backtest adds one point per %, up to 15, to
+a score built from momentum and earnings drift only; the live score scales it by
+those pillars' combined weight, 0.75, so it moves ranks by the same amount.)
+
+Stocks up 200%+ in a year or 50%+ above their 200-day average are marked
+`overextended` (🔥 in Slack). The flag is a warning, not a score change: such
+stocks fall 15%+ within two weeks about three times as often, but in the
+backtest they also carried nearly all of the short-term model's excess return.
+Consider a smaller position rather than skipping them.
 
 `action_list.csv` is the "what to act on" view. It keeps short-term ranked
 names that sit in the top half of the long-term ranking (this long-term filter
@@ -274,7 +291,7 @@ through a stop are taken in full. Strategies compare the production price model
 with momentum alone, drift alone, and the 3.2.0 setup-gated composite.
 
 Results of the 5-year run (2021-11 to 2026-08, 246 weekly dates, 10 bps each
-way), per 10-session trade:
+way), per 10-session trade, before model 3.4.0:
 
 | Strategy | Excess net | t-stat |
 |---|---|---|
@@ -287,6 +304,22 @@ A one-sigma stop with a 1.5-sigma target lowered the momentum list to +0.57%;
 a two-sigma stop cost little (+0.66%). These figures are in-sample (the
 momentum weights were chosen on the same period) and subject to survivorship
 bias, so expect live results to be weaker.
+
+Model 3.4.0 run (2022-01 to 2026-10, 245 weekly dates, earnings drift included):
+
+| Strategy | Excess net | t-stat | Picks falling 15%+ in the hold |
+|---|---|---|---|
+| Production 3.4.0 (with pullback bonus) | +0.75% | 3.0 | 4.7% |
+| Production 3.3.0 | +0.58% | 2.4 | 4.9% |
+| Production 3.4.0 skipping overextended stocks | +0.26% | 1.3 | 3.4% |
+
+The bonus settings were chosen on this period (in-sample). Caps of 10–20 and
+momentum floors of 60–80 gave similar results, and the 3.4.0 model beat 3.3.0
+in both halves of the period and in four of five calendar years (2025 was
+weaker: +0.95% vs +1.32%). The paired improvement is +0.17 points per trade
+with t = 1.3, so treat it as likely but unproven until live results confirm it.
+Skipping overextended stocks cut the big-fall rate but gave up two thirds of
+the return.
 
 Analyst, valuation and fundamental pillars have no point-in-time history and are
 not replayed; the live validation below covers them. The universe and sector

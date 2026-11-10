@@ -169,7 +169,7 @@ def test_missing_endpoint_data_does_not_invalidate_valid_equity_mapping():
 
 def test_stoxx_mapping_health_gate_and_scoring_version_are_unchanged():
     assert MAPPING_INVALID_PCT == 90
-    assert SCORING_MODEL_VERSION == "3.3.0"
+    assert SCORING_MODEL_VERSION == "3.4.0"
 
 
 def test_provider_identity_mismatch_and_verified_persistence():
@@ -300,7 +300,7 @@ def test_low_coverage_cohort_is_excluded_but_diagnostic_remains():
 def test_maturity_coverage_uses_only_matured_predictions(tmp_path):
     store = HistoryStore(tmp_path / "history.db")
     rows = [{"symbol": f"S{i}", "short_term_score": 50, "short_term_rank": i + 1} for i in range(100)]
-    store.save_predictions("r", "2025-01-01T00:00:00+00:00", "3.3.0", rows)
+    store.save_predictions("r", "2025-01-01T00:00:00+00:00", "3.4.0", rows)
     with store.db:
         for i in range(55):
             store.db.execute("UPDATE prediction_outcomes SET forward_5d_return=1 WHERE run_id='r' AND symbol=?", (f"S{i}",))
@@ -332,3 +332,46 @@ def test_incremental_price_history_uses_store_and_combines(monkeypatch):
     assert len(first["AAA"].dropna(how="all")) == 10
     assert len(second["AAA"].dropna(how="all")) >= 2
     assert store.history("A").raw_close.isna().all()
+
+
+def test_incremental_price_history_skips_bars_without_close(monkeypatch):
+    store = PriceStore(sqlite3.connect(":memory:"))
+    days = pd.date_range("2025-01-08", "2025-01-10", freq="D")
+    frame = pd.DataFrame({"Close": [10.0, 11.0, np.nan], "Volume": [1, 2, 3]}, index=days)
+    monkeypatch.setattr(main, "download_prices_range", lambda symbols, start, end: pd.concat({"AAA": frame}, axis=1))
+    main._incremental_price_history(store, {"A": "AAA"}, date(2025, 1, 8), date(2025, 1, 10))
+    assert store.history("A").date.max() == pd.Timestamp("2025-01-09")
+
+
+def test_range_download_retries_symbols_returned_without_latest_close(monkeypatch):
+    from investment_ai.data import prices
+    days = pd.date_range("2025-01-08", periods=3, freq="D")
+    calls = []
+
+    def fake_chunk(symbols, period=None, start=None, end=None):
+        calls.append(list(symbols))
+        if len(calls) > 1:  # the retry succeeds
+            return pd.concat({s: pd.DataFrame({"Close": [1.0, 2.0, 3.0], "Volume": 1}, index=days) for s in symbols}, axis=1)
+        return pd.concat({
+            "A.DE": pd.DataFrame({"Close": [1.0, 2.0, 3.0], "Volume": 1}, index=days),
+            "B.DE": pd.DataFrame({"Close": [1.0, 2.0, np.nan], "Volume": 1}, index=days),
+            "C.DE": pd.DataFrame({"Close": [np.nan] * 3, "Volume": np.nan}, index=days),
+        }, axis=1)
+
+    monkeypatch.setattr(prices, "_download_chunk", fake_chunk)
+    result = prices.download_prices_range(["A.DE", "B.DE", "C.DE"], days[0], days[-1])
+    assert calls[1] == ["B.DE", "C.DE"]
+    assert result["C.DE"]["Close"].iloc[-1] == 3.0
+    assert result.attrs["missing_after_retry_count"] == 0
+
+
+def test_stoxx_rights_lines_are_dropped():
+    from investment_ai.data.constituents import _normalize_stoxx
+    raw = pd.DataFrame({
+        "Ticker": ["UNI", "UNI", "SAP"],
+        "Name": ["UNIPOL ASSICURAZIONI SPA", "UNIPOL ASSICURAZIONI SPA RIGHTS", "SAP SE"],
+        "Location": ["Italy", "Italy", "Germany"],
+        "Asset Class": ["Equity"] * 3,
+    })
+    result = _normalize_stoxx(raw)
+    assert result.security.tolist() == ["UNIPOL ASSICURAZIONI SPA", "SAP SE"]

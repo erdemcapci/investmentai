@@ -90,14 +90,14 @@ def _rank(value) -> str:
 
 
 def _analyst_target(row: pd.Series) -> str:
-    """Average analyst price target with the implied move from today's price."""
+    """Implied move from today's price to the average analyst price target."""
     target = pd.to_numeric(row.get("target_mean"), errors="coerce")
     price = pd.to_numeric(row.get("current_price"), errors="coerce")
     if pd.isna(target) or pd.isna(price) or price <= 0:
         return "n/a"
     analysts = pd.to_numeric(row.get("rating_count"), errors="coerce")
     count = f" ({int(analysts)})" if pd.notna(analysts) else ""
-    return f"{_money(target, row.get('trading_currency'))} {(target / price - 1) * 100:+.0f}%{count}"
+    return f"{(target / price - 1) * 100:+.0f}%{count}"
 
 
 def ranking_table(full: pd.DataFrame, rank: str, other: str, other_label: str,
@@ -108,7 +108,7 @@ def ranking_table(full: pd.DataFrame, rank: str, other: str, other_label: str,
     top = full[pd.to_numeric(full[rank], errors="coerce").le(size)].sort_values(rank)
     width = max([len("Symbol")] + [len(str(symbol)) for symbol in top.symbol]) + 1
     header = (f"{'#':>2} {'Symbol':<{width}}{'Company':<{NAME_WIDTH + 1}}{other_label:>3}  "
-              f"{'Price':>9}  Analyst avg target")
+              f"{'Price':>9}  Analyst target")
     rows = [header]
     for _, row in top.iterrows():
         rows.append(
@@ -119,9 +119,15 @@ def ranking_table(full: pd.DataFrame, rank: str, other: str, other_label: str,
     return "```" + "\n".join(rows) + "```"
 
 
+def _overextended(row: pd.Series) -> bool:
+    # numpy and CSV-loaded booleans are not ``True`` by identity.
+    return row.get("overextended") in (True, "True")
+
+
 def _flag(row: pd.Series) -> str:
     status = row.get("data_check_status")
-    return "  ⚠" if status == "CHECK" else "  ✖" if status == "INCOMPLETE" else ""
+    data = "  ⚠" if status == "CHECK" else "  ✖" if status == "INCOMPLETE" else ""
+    return data + ("  🔥" if _overextended(row) else "")
 
 
 def _price_date(full: pd.DataFrame) -> date | None:
@@ -132,6 +138,8 @@ def _price_date(full: pd.DataFrame) -> date | None:
 def _warnings(row: pd.Series) -> list[str]:
     """The stock's own data-check notes plus a volatility caution."""
     notes = [note for note in str(row.get("data_check_notes") or "").split("; ") if note and note != "nan"]
+    if _overextended(row) and row.get("overextension_note"):
+        notes.append(str(row.get("overextension_note")))
     stop = pd.to_numeric(row.get("stop_loss_pct"), errors="coerce")
     if pd.notna(stop) and stop >= VOLATILE_STOP_PCT:
         notes.append("very volatile (stop at the 25% cap) — consider half size")
@@ -150,6 +158,8 @@ def due_for_sale(runs: list[dict], current_date: date) -> tuple[str, date, list[
             continue
         sessions = int(np.busday_count(run_date, current_date))
         if HOLD_SESSIONS <= sessions <= HOLD_SESSIONS + 2:
+            if "symbol" not in action:  # that run exported no action list, so nothing was bought
+                continue
             return run["run_id"], run_date, pick_basket(action).symbol.tolist()
         if sessions > HOLD_SESSIONS + 2:
             break
@@ -215,7 +225,8 @@ def daily_message(runs_dir: Path) -> str:
     lines.append(ranking_table(full, "short_term_rank", "long_term_rank", "LT"))
     lines.append("*Long-term top 20* — with short-term rank (ST)")
     lines.append(ranking_table(full, "long_term_rank", "short_term_rank", "ST"))
-    lines.append("_⚠ = check the stock's data first, ✖ = data incomplete (not in the action list). "
+    lines.append("_⚠ = check the stock's data first, ✖ = data incomplete (not in the action list), "
+                 "🔥 = after a huge run or far above its trend: 1 in 3 to 1 in 6 such stocks fell 20%+ within 2 months. "
                  "Analyst targets are context, not a model input._")
     due = due_for_sale(runs[1:], as_of) if as_of else None
     if due:

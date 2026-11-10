@@ -248,6 +248,10 @@ def _incremental_price_history(
             history = symbol_history(delta, symbol)
             quality, flags = price_quality(history)
             for day, bar in history.iterrows():
+                # A bar without a close is a failed or still-forming fetch; storing it would
+                # advance the cached date and stop the next run from refetching that day.
+                if pd.isna(bar.get("Close")):
+                    continue
                 rows.append({
                     "security_id": ids[symbol], "symbol": symbol, "date": day,
                     "adjusted_close": bar.get("Close"), "raw_close": None,
@@ -275,7 +279,7 @@ def methodology() -> pd.DataFrame:
             },
             {
                 "score": "Ranking",
-                "formula": "Ranks sort by risk-adjusted score = score - 0.20 x max(risk - 50, 0), minus 5 short-term points when earnings are due within 2 days",
+                "formula": "Ranks sort by risk-adjusted score = score - 0.20 x max(risk - 50, 0), minus 5 short-term points when earnings are due within 2 days; short-term adds 0.75 points per % below the 20-day high (max 11.25) for strong stocks (momentum >= 70) above their 200-day average",
             },
             {
                 "score": "Action list",
@@ -664,6 +668,13 @@ def execute(
             .isin(["VERIFIED", "HEURISTIC"])
             & universe.symbol.notna()
         ].copy()
+        duplicated = analysis_universe.symbol.duplicated()
+        if duplicated.any():
+            logger.warning(
+                "dropping duplicate universe symbols=%s",
+                ",".join(sorted(set(analysis_universe.symbol[duplicated]))),
+            )
+            analysis_universe = analysis_universe[~duplicated].copy()
 
         start = time.monotonic()
         downloaded = None

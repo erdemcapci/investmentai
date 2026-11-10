@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.4.0 (scoring model 3.4.0)
+
+- Short-term pullback bonus: strong stocks (momentum pillar 70+) above their
+  200-day average gain 0.75 short-term points per % below their 20-day high,
+  up to 11.25 (`pullback_bonus_points`; one point and 15 in the backtest's
+  momentum-and-drift score). No bonus at 20%+ below the high, where the
+  rebound was unreliable. In the 5-year walk-forward backtest (2022–2026) the
+  production top-20 return rose from +0.58% to +0.75% excess per 10 sessions
+  net of costs (t 2.4 → 3.0), and the share of picks falling 15%+ dipped from
+  4.9% to 4.7%.
+  A flat bonus for shallow 3–8% dips lowered returns and was not adopted.
+- Overextension warning (`overextended`, `overextension_note`): up 200%+ in a
+  year or 50%+ above the 200-day average. Shown as 🔥 in Slack. It does not
+  change scores: in the backtest a quarter of production picks carried it and
+  they produced nearly all of the excess return (+2.3% vs 0.0% per 10
+  sessions), while falling 15%+ during the hold three times as often.
+- Backtest: `production_price_model` now includes the pullback bonus, with
+  `production_3_3_0` and `production_skip_overextended` for comparison; trade
+  statistics add the share of picks that fell 15%+ and the 5th-percentile trade.
+- Prices: symbols that Yahoo returns empty, or without their latest close, are
+  retried; bars without a close are no longer stored.
+- STOXX rights and warrant lines are dropped, and a duplicated universe symbol
+  is logged and skipped instead of failing the run.
+- Slack: the analyst column shows the implied move only; the sell reminder
+  skips runs that exported no action list.
+
 ## 1.3.0 (scoring model 3.3.0)
 
 - Reweighted the short-term model on 5-year backtest evidence: Relative

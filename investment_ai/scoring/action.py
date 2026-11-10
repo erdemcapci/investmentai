@@ -16,25 +16,60 @@ from investment_ai.config import (
     EARNINGS_IMMINENT_DAYS,
     EARNINGS_IMMINENT_PENALTY,
     MAX_POSITION_PCT,
+    PULLBACK_BONUS_CAP,
+    PULLBACK_BONUS_MAX_DRAWDOWN_PCT,
+    PULLBACK_BONUS_MIN_MOMENTUM,
     RISK_PENALTY_PER_POINT,
     TRADE_RISK_BUDGET_PCT,
 )
 from investment_ai.features.benchmark import REBOUND_RISK, RISK_OFF
+from investment_ai.scoring.short_term import SHORT_TERM_WEIGHTS
 
 SHORT_TERM_HOLDING_SESSIONS = 10
+# The backtest replays only the momentum and earnings-drift pillars, whose
+# weights renormalise to 87% and 13%; in the live score momentum is 65%.
+# Scaling by their combined live weight keeps the bonus the same size relative
+# to the momentum pillar as in the backtest (0.75 points per %, at most 11.25).
+PULLBACK_LIVE_SCALE = SHORT_TERM_WEIGHTS["momentum"] + SHORT_TERM_WEIGHTS["earnings_drift"]
 STOP_SIGMA_MULTIPLE = 2.0
 REWARD_TO_RISK = 1.5
 MIN_STOP_PCT, MAX_STOP_PCT = 3.0, 25.0
 
 
+def pullback_bonus(row: dict, momentum_key: str = "short_rs_score") -> float:
+    """Short-term points for a strong stock that has eased off its 20-day high.
+
+    One point per % below the 20-day high in backtest score units, capped at
+    ``PULLBACK_BONUS_CAP`` (the live score applies ``PULLBACK_LIVE_SCALE``),
+    while the momentum pillar is strong, the price is above its 200-day
+    average and the fall is under ``PULLBACK_BONUS_MAX_DRAWDOWN_PCT``.  In the
+    5-year walk-forward backtest (2022-2026) strong stocks 5-20% below their
+    20-day high in an intact uptrend recovered more than those at their high,
+    with t-statistics of 2.2-2.8; beyond 20% the rebound was unreliable (t
+    about 0.5) and another 15% fall within 10 sessions was 2-4 times as
+    common, so such stocks earn nothing.  Shallow 3-8% dips alone did not help.
+    """
+    momentum = pd.to_numeric(row.get(momentum_key), errors="coerce")
+    above_trend = pd.to_numeric(row.get("price_vs_ma200_pct"), errors="coerce")
+    drawdown = pd.to_numeric(row.get("drawdown_from_20d_high_pct"), errors="coerce")
+    if (pd.isna(momentum) or pd.isna(above_trend) or pd.isna(drawdown)
+            or momentum < PULLBACK_BONUS_MIN_MOMENTUM or above_trend <= 0
+            or -drawdown >= PULLBACK_BONUS_MAX_DRAWDOWN_PCT):
+        return 0.0
+    return float(min(max(-drawdown, 0.0), PULLBACK_BONUS_CAP))
+
+
 def risk_adjusted_scores(row: dict) -> dict:
-    """Deduct points for risk above neutral and for imminent earnings events."""
+    """Deduct points for risk and imminent earnings; add the short-term pullback bonus."""
     risk = pd.to_numeric(row.get("risk_score"), errors="coerce")
     penalty = RISK_PENALTY_PER_POINT * max(risk - 50, 0) if pd.notna(risk) else 0.0
     days_to = pd.to_numeric(row.get("days_to_next_earnings"), errors="coerce")
     imminent = bool(pd.notna(days_to) and 0 <= days_to <= EARNINGS_IMMINENT_DAYS)
-    output = {"risk_penalty_points": penalty, "earnings_imminent_flag": imminent}
-    for horizon, extra in (("long_term", 0.0), ("short_term", EARNINGS_IMMINENT_PENALTY if imminent else 0.0)):
+    bonus = pullback_bonus(row) * PULLBACK_LIVE_SCALE
+    output = {"risk_penalty_points": penalty, "earnings_imminent_flag": imminent,
+              "pullback_bonus_points": bonus}
+    short_extra = (EARNINGS_IMMINENT_PENALTY if imminent else 0.0) - bonus
+    for horizon, extra in (("long_term", 0.0), ("short_term", short_extra)):
         score = pd.to_numeric(row.get(f"{horizon}_score"), errors="coerce")
         output[f"{horizon}_risk_adjusted_score"] = (
             float(score - penalty - extra) if pd.notna(score) else np.nan

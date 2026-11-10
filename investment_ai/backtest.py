@@ -47,9 +47,10 @@ from investment_ai.features.technical import (
     price_features,
     setup_scores,
 )
-from investment_ai.scoring.action import trade_plan
+from investment_ai.scoring.action import pullback_bonus, trade_plan
 from investment_ai.scoring.common import weighted
 from investment_ai.scoring.long_term import long_trend_pillar
+from investment_ai.scoring.overextension import overextension_check
 from investment_ai.scoring.short_term import (
     CREDIBLE_SETUPS,
     SHORT_TERM_WEIGHTS,
@@ -59,6 +60,11 @@ from investment_ai.scoring.short_term import (
 )
 
 HORIZONS = (5, 10, 20)
+# Price context kept on each observation for the overextension and pullback
+# strategy variants; these are not signals.
+CONTEXT_COLUMNS = [
+    "price_vs_ma200_pct", "return_252d_pct", "drawdown_from_20d_high_pct", "return_5d_pct",
+]
 MIN_HISTORY_SESSIONS = 64
 TOP_N = 25
 # Model 3.2.0's price-pillar weights, kept to compare against production.
@@ -163,7 +169,10 @@ def score_cross_section(features: pd.DataFrame, universe: pd.DataFrame, benchmar
         )
     ]
     columns = ["symbol", "sector", "benchmark_symbol", "market_regime", "volatility_20d", "volatility_60d"]
-    output = frame.reindex(columns=columns).copy()
+    output = frame.reindex(columns=columns + CONTEXT_COLUMNS).copy()
+    output["overextended"] = [
+        overextension_check(row)["overextended"] for row in output.to_dict("records")
+    ]
     for name, values in signals.items():
         output[name] = values
     return output
@@ -274,8 +283,16 @@ def strategy_definitions(scored: pd.DataFrame) -> dict[str, pd.Series]:
         ],
         index=scored.index,
     )
+    # Production 3.4.0 adds the short-term pullback bonus on the same momentum pillar.
+    bonus = pd.Series(
+        [pullback_bonus(row, "momentum_pillar_raw") for row in scored.to_dict("records")],
+        index=scored.index,
+    )
+    overextended = scored.overextended.astype(bool)
     definitions = {
-        "production_price_model": production,
+        "production_price_model": production + bonus,
+        "production_3_3_0": production,
+        "production_skip_overextended": (production + bonus).where(~overextended),
         "momentum_all": scored.momentum_pillar_raw,
         "gated_momentum": scored.momentum_pillar_raw.where(credible),
         "gated_composite_3_2_0": scored.st_price_composite_raw.where(credible),
@@ -332,6 +349,7 @@ def simulate_trades(
             exits["trade_plan"] = (exit_at, reason)
         for mode, (day, reason) in exits.items():
             stock_return = (path.iloc[day] / start - 1) * 100
+            worst_close = (path.iloc[1:day + 1].min() / start - 1) * 100
             market_return = (market_path.iloc[day] / market_path.iloc[0] - 1) * 100
             trades.append(
                 {
@@ -341,6 +359,7 @@ def simulate_trades(
                     "sessions_held": day,
                     "return_net_pct": stock_return - round_trip,
                     "excess_net_pct": stock_return - market_return - round_trip,
+                    "worst_close_pct": worst_close,
                 }
             )
     return trades
@@ -369,6 +388,11 @@ def summarize_strategies(trades: pd.DataFrame, step: int) -> pd.DataFrame:
                 if std and np.isfinite(std) and std > 0 else np.nan,
                 "portfolio_win_rate": portfolio.gt(0).mean(),
                 "worst_portfolio_excess_pct": portfolio.min(),
+                # How often a pick fell 15%+ below the entry price at some
+                # close during the hold, and the 5th-percentile trade.
+                "fell_15pct_rate": group.worst_close_pct.le(-15).mean()
+                if "worst_close_pct" in group else np.nan,
+                "p05_trade_return_net_pct": group.return_net_pct.quantile(0.05),
                 "mean_sessions_held": group.sessions_held.mean(),
                 "stop_rate": group.exit_reason.eq("STOP").mean(),
                 "target_rate": group.exit_reason.eq("TARGET").mean(),
@@ -463,7 +487,7 @@ def run_backtest(
 
 def _signal_columns(panel: pd.DataFrame) -> list[str]:
     excluded = {"symbol", "sector", "benchmark_symbol", "market_regime", "as_of",
-                "volatility_20d", "volatility_60d"}
+                "volatility_20d", "volatility_60d", "overextended", *CONTEXT_COLUMNS}
     return [c for c in panel if c not in excluded and not c.startswith("forward_")]
 
 

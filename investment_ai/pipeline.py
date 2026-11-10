@@ -30,6 +30,7 @@ from investment_ai.features.valuation import add_peer_percentiles
 from investment_ai.features.fundamentals import is_financial
 from investment_ai.scoring.action import risk_adjusted_scores, trade_plan
 from investment_ai.scoring.data_check import stock_data_check
+from investment_ai.scoring.overextension import overextension_check
 from investment_ai.scoring.common import curve, safe_nanmean, weighted
 from investment_ai.scoring.long_term import RELATIVE_METRICS, score_long_term
 from investment_ai.scoring.ranking import rank_results
@@ -454,7 +455,8 @@ def build_analysis(
         short_term.set_index("symbol").short_term_rank
     )
     checks = pd.DataFrame(
-        [stock_data_check(row) for row in frame.to_dict("records")], index=frame.index
+        [{**stock_data_check(row), **overextension_check(row)} for row in frame.to_dict("records")],
+        index=frame.index,
     )
     for column in checks:
         frame[column] = checks[column]

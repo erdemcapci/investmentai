@@ -252,6 +252,11 @@ def _normalize_stoxx(raw: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("STOXX source is missing company, ticker, or country")
     if "asset_class" in raw:
         raw = raw[raw["asset_class"].astype(str).str.casefold().eq("equity")]
+    # Temporary rights/warrant lines (e.g. "UNIPOL ASSICURAZIONI SPA RIGHTS") share the
+    # parent's ticker and would map onto the same Yahoo symbol.
+    raw = raw[~raw[company_column].astype(str).str.upper().str.contains(
+        r"\b(?:RIGHTS?|RTS|WARRANTS?|WTS)\s*$", regex=True
+    )]
     industry_column = next(
         (c for c in ("industry", "icb_sector", "sector") if c in raw), None
     )

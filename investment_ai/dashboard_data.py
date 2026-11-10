@@ -16,6 +16,7 @@ import pandas as pd
 from investment_ai.runtime import horizon_run_statuses
 from investment_ai.scoring.common import NEUTRAL, weighted
 from investment_ai.scoring.data_check import stock_data_check
+from investment_ai.scoring.overextension import overextension_check
 
 # Pillar columns a viewer can re-weight, with the production weights.
 SHORT_TERM_PILLARS = {
@@ -67,9 +68,14 @@ def load_run(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
             [stock_data_check(row) for row in full.to_dict("records")], index=full.index
         )
         full = pd.concat([full, checks], axis=1)
-    if len(action) and "data_check_status" not in action and "symbol" in action:
+    if "overextended" not in full:
+        flags = pd.DataFrame(
+            [overextension_check(row) for row in full.to_dict("records")], index=full.index
+        )
+        full = pd.concat([full, flags], axis=1)
+    if len(action) and "overextended" not in action and "symbol" in action:
         lookup = full.drop_duplicates("symbol").set_index("symbol")
-        for column in ("data_check_status", "data_check_notes"):
+        for column in ("data_check_status", "data_check_notes", "overextended", "overextension_note"):
             action[column] = action.symbol.map(lookup[column])
     return full, action
 
